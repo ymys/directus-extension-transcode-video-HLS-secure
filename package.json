@@ -1,8 +1,8 @@
 {
-	"name": "directus-extension-transcode-video-operation",
+	"name": "directus-extension-transcode-video-hls-secure",
 	"description": "Transcode uploaded videos to adaptive HLS streams with multiple quality levels (240p, 480p, 720p, 1080p, 4K)",
 	"icon": "extension",
-	"version": "1.2.0",
+	"version": "2.3.0",
 	"license": "MIT",
 	"keywords": [
 		"directus",
@@ -30,12 +30,12 @@
 	},
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/domdus/directus-extension-transcode-video-operation.git"
+		"url": "git+https://github.com/ymys/directus-extension-transcode-video-HLS-secure.git"
 	},
 	"bugs": {
-		"url": "https://github.com/domdus/directus-extension-transcode-video-operation/issues"
+		"url": "https://github.com/ymys/directus-extension-transcode-video-HLS-secure/issues"
 	},
-	"homepage": "https://github.com/domdus/directus-extension-transcode-video-operation#readme",
+	"homepage": "https://github.com/ymys/directus-extension-transcode-video-HLS-secure#readme",
 	"scripts": {
 		"build": "directus-extension build",
 		"dev": "directus-extension build -w --no-minify",
