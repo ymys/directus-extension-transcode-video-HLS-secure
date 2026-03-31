@@ -10,14 +10,11 @@ This extension adds a custom operation to Directus Flows that automatically tran
 
 ## Features
 
-- **Adaptive HLS Streaming**: Transcodes videos to HLS format with multiple quality levels
-- **HLS AES-128 Encryption**: Automatically secures every video with a unique, randomly generated 16-byte encryption key
-- **Smart Quality Selection**: Automatically prevents upscaling - only transcodes qualities equal to or lower than source resolution
-- **Multiple Quality Levels**: Supports 240p, 480p, 720p, 1080p, and 2160p (4K)
-- **Automatic Thumbnail Extraction**: Extracts thumbnail image at 1 second from video
-- **High Bit Depth Support**: Automatically detects and converts 10-bit videos to 8-bit for maximum compatibility
-- **Folder Organization**: Automatically creates and organizes transcoded files in Directus folders
-- **Video Metadata Extraction**: Extracts dimensions, duration, and orientation information
+- **AI Auto-Transcription**: Generates WebVTT subtitles automatically using:
+  - **Local Engine**: On-premise transcription via `@xenova/transformers` (Whisper)
+  - **Cloud API**: OpenAI-compatible endpoints (Groq, Ollama, Azure, Gemini, etc.)
+- **Vendor-Agnostic**: Support for any OpenAI-compatible transcription service
+- **Automatic VTT Upload**: Transcripts are saved and uploaded as `.vtt` files to Directus
 - **Cloud Storage Support**: Works with local storage, S3, GCS, Azure, and other cloud storage adapters
   - Automatically downloads source files from cloud storage for processing
   - Uploads transcoded files to specified storage location
@@ -34,27 +31,30 @@ This extension adds a custom operation to Directus Flows that automatically tran
 - **FFmpeg**: FFmpeg must be installed and available in the system PATH
   - Installation: `apt-get install ffmpeg` (Debian/Ubuntu) or `brew install ffmpeg` (macOS)
   - Verify: `ffmpeg -version` and `ffprobe -version`
-  - **Docker**: For Docker deployments (https://directus.io/docs/self-hosting/deploying#docker-compose-examples):
-    1. Add build configuration to your `docker-compose.yml`:
-       ```yaml
-       directus:
-         build:
-           context: .
-           dockerfile: Dockerfile
-       ```
-    2. Create a `Dockerfile` in the same directory with:
-       ```dockerfile
-       FROM directus/directus:11.13.2
-       
-       USER root
-       RUN apk add --no-cache ffmpeg
-       RUN ffmpeg -version && ffprobe -version
-       USER node
-       ```
-    3. Rebuild and restart your containers:
-       ```bash
-       docker compose up --build -d
-       ```
+- **Node.js 18+**: Required if using the **Local** transcription engine (Whisper via Transformers.js)
+- **Memory**: At least 2GB of free RAM is recommended for local transcription (Whisper Small/Base models)
+- **AI API Key**: Required for **Cloud API** transcription (e.g., OpenAI, Groq, etc.)
+- **Docker**: For Docker deployments (https://directus.io/docs/self-hosting/deploying#docker-compose-examples):
+     1. Add build configuration to your `docker-compose.yml`:
+        ```yaml
+        directus:
+          build:
+            context: .
+            dockerfile: Dockerfile
+        ```
+     2. Create a `Dockerfile` in the same directory with:
+        ```dockerfile
+        FROM directus/directus:11.13.2
+        
+        USER root
+        RUN apk add --no-cache ffmpeg
+        RUN ffmpeg -version && ffprobe -version
+        USER node
+        ```
+     3. Rebuild and restart your containers:
+        ```bash
+        docker compose up --build -d
+        ```
 
 ## Installation
 
@@ -147,6 +147,17 @@ directus/extensions/directus-extension-transcode-video-operation/
   - Recommended: Use `19` when transcoding might impact system performance
   - **Note**: Only works on Unix-like systems (Linux, macOS). On Windows, this setting is ignored with a warning.
 
+- **Transcription Engine** (optional, default: `none`): AI engine for generating subtitles
+  - **None**: No transcription
+  - **Local (Transformers.js)**: Runs Whisper locally on your server (no API costs, requires more RAM/CPU)
+  - **Cloud API (OpenAI Compatible)**: Uses external APIs like OpenAI, Groq, Gemini, or Ollama
+
+- **Transcription Model** (optional, default: `whisper-1`): Specific AI model to use
+  - For Cloud API: `whisper-1` (OpenAI), `whisper-large-v3` (Groq), etc.
+  - For Local: `Xenova/whisper-tiny`, `Xenova/whisper-base`, `Xenova/whisper-small`
+
+- **Transcription Language** (optional, default: `id`): Language code for transcription (e.g., `id`, `en`, `es`, `fr`)
+
 - **Playlist Reference Type** (optional, default: `id`): How playlists should reference segments
   - **`id`** (default): Uses Directus file IDs - playlists reference segments as `/assets/:file_id` to run against /assets endpoint
   - **`filename_disk`**: Uses original filenames - playlists reference segments by filename (useful for custom streaming servers)
@@ -224,7 +235,8 @@ The operation returns a JSON object with:
       "isVertical": false
     },
     "duration": 125000,
-    "thumbnail": "thumbnail-file-uuid"
+    "thumbnail": "thumbnail-file-uuid",
+    "transcript_id": "vtt-file-uuid"
   },
   "files": [
     {
@@ -316,6 +328,13 @@ The operation requires several standard Directus environment variables to be cor
 - `STORAGE_[LOCATION]_ROOT`: Required for local storage path resolution.
 - `PUBLIC_URL`: Used to construct the internal download URL when source files are on cloud storage.
 - `HOST` and `PORT`: Used as fallbacks if `PUBLIC_URL` is not defined.
+
+### AI Transcription Variables (Optional)
+
+If using the `Cloud API` transcription engine:
+
+- `AI_TRANSCRIPTION_API_KEY`: Your API key for the transcription service (e.g., OpenAI Key, Groq Key).
+- `AI_TRANSCRIPTION_BASE_URL`: Base URL for the OpenAI-compatible API (e.g., `https://api.groq.com/openai/v1`, `http://localhost:11434/v1`). Defaults to OpenAI's base URL.
 
 ## Security Considerations
 

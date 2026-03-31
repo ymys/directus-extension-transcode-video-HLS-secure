@@ -211,6 +211,93 @@ export default {
 				default_value: 19,
 				required: false
 			}
+		},
+		{
+			field: 'transcription_divider',
+			name: 'AI Transcription Settings',
+			type: 'alias',
+			meta: {
+				width: 'full',
+				interface: 'presentation-divider',
+				special: ['alias', 'no-data'],
+				options: {
+					title: 'AI Auto-Transcription (Subtitle/VTT)',
+					icon: 'spellcheck'
+				}
+			},
+			schema: {}
+		},
+		{
+			field: 'transcription_engine',
+			name: 'Transcription Engine',
+			type: 'string',
+			meta: {
+				width: 'half',
+				interface: 'select-dropdown',
+				options: {
+					choices: [
+						{ text: 'None (Disabled)', value: 'none' },
+						{ text: 'Local (Transformers.js / Whisper)', value: 'local_transformers' },
+						{ text: 'Cloud API (OpenAI Compatible)', value: 'cloud_api' }
+					]
+				},
+				note: 'Select the engine to use for generating subtitles/VTT.'
+			},
+			schema: {
+				default_value: 'none'
+			}
+		},
+		{
+			field: 'transcription_model',
+			name: 'Transcription Model',
+			type: 'string',
+			meta: {
+				width: 'half',
+				interface: 'input',
+				options: {
+					placeholder: 'whisper-1'
+				},
+				note: 'The specific model name for the Cloud API (e.g., whisper-1, whisper-large-v3)',
+				conditions: [
+					{
+						name: 'Show only when cloud_api',
+						rule: {
+							transcription_engine: {
+								_eq: 'cloud_api'
+							}
+						},
+						hidden: false
+					},
+					{
+						name: 'Hide when not cloud_api',
+						rule: {
+							transcription_engine: {
+								_neq: 'cloud_api'
+							}
+						},
+						hidden: true
+					}
+				]
+			},
+			schema: {
+				default_value: 'whisper-1'
+			}
+		},
+		{
+			field: 'transcription_language',
+			name: 'Transcription Language',
+			type: 'string',
+			meta: {
+				width: 'half',
+				interface: 'input',
+				options: {
+					placeholder: 'id'
+				},
+				note: 'ISO-639-1 language code for the audio source.'
+			},
+			schema: {
+				default_value: 'id'
+			}
 		}
 	],
 };

@@ -45,13 +45,16 @@ interface File {
 interface OperationInput {
 	file: File | string;
 	folder_id?: string;
+	storage_adapter?: 'default' | 'source' | 'custom';
+	target_storage?: string;
+	threads?: number | string;
+	nice?: number | string;
 	keyBaseUrl?: string;
 	playlist_reference_type?: 'id' | 'filename_disk';
 	qualities?: string[] | string;
-	threads?: number | string;
-	nice?: number | string;
-	storage_adapter?: 'default' | 'source' | 'custom';
-	target_storage?: string;
+	transcription_engine?: 'none' | 'local_transformers' | 'cloud_api';
+	transcription_model?: string;
+	transcription_language?: string;
 }
 
 interface QualityOption {
@@ -90,10 +93,35 @@ interface OperationResult {
 		};
 		duration: number;
 		thumbnail: string | null;
+		transcript_id?: string | null;
 	};
 	files: UploadedFile[];
 	error?: string;
 }
+
+/**
+ * Formats seconds into WebVTT timestamp format (HH:MM:SS.mmm)
+ */
+const formatVttTimestamp = (seconds: number): string => {
+	const h = Math.floor(seconds / 3600);
+	const m = Math.floor((seconds % 3600) / 60);
+	const s = Math.floor(seconds % 60);
+	const ms = Math.floor((seconds % 1) * 1000);
+	return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${ms.toString().padStart(3, '0')}`;
+};
+
+/**
+ * Converts Transformers.js output to WebVTT format
+ */
+const formatVtt = (chunks: any[]): string => {
+	let vtt = 'WEBVTT\n\n';
+	chunks.forEach((chunk, index) => {
+		const start = formatVttTimestamp(chunk.timestamp[0]);
+		const end = formatVttTimestamp(chunk.timestamp[1] || chunk.timestamp[0] + 2);
+		vtt += `${index + 1}\n${start} --> ${end}\n${chunk.text.trim()}\n\n`;
+	});
+	return vtt;
+};
 
 export default {
 	id: 'transcode-video-operation',
@@ -107,7 +135,10 @@ export default {
 			threads = 1,
 			nice,
 			storage_adapter = 'default',
-			target_storage
+			target_storage,
+			transcription_engine = 'none',
+			transcription_model,
+			transcription_language
 		}: OperationInput, 
 		{ env, services, getSchema, logger }: OperationContext
 	): Promise<OperationResult | { error: string }> => {
@@ -126,8 +157,9 @@ export default {
 		if (typeof file === 'string') {
 			try {
 				const { FilesService } = services;
+				const schema = await getSchema();
 				const filesService = new FilesService({
-					schema: await getSchema(),
+					schema,
 				});
 				
 				const fileRecord = await filesService.readOne(file);
@@ -1037,6 +1069,111 @@ export default {
 		
 		const sourceHeight = sourceMetadata.height;
 		logger.info(`[transcode-video-operation] (${filename}) Source video resolution: ${sourceMetadata.width}x${sourceHeight}`);
+
+		// --- AI Auto-Transcription Support ---
+		let transcriptId: string | undefined = undefined;
+		const transcriptionEngine = transcription_engine || 'none';
+		const transcriptionLanguage = transcription_language || 'id';
+		const transcriptionModel = transcription_model || 'whisper-1';
+
+		if (transcriptionEngine !== 'none') {
+			const audioTempPath = path.join(os.tmpdir(), `${filename}_audio_${crypto.randomBytes(4).toString('hex')}.wav`);
+			logger.info(`[transcode-video-operation] (${filename}) Starting transcription with engine: ${transcriptionEngine}`);
+			
+			try {
+				// 1. Extract 16kHz mono audio for transcription
+				logger.info(`[transcode-video-operation] (${filename}) Extracting audio to: ${audioTempPath}`);
+				await new Promise<void>((resolve, reject) => {
+					exec(`ffmpeg -i ${filePath} -vn -acodec pcm_s16le -ar 16000 -ac 1 -y ${audioTempPath}`, (error: any) => {
+						if (error) reject(error);
+						else resolve();
+					});
+				});
+
+				let vttContent = '';
+
+				if (transcriptionEngine === 'cloud_api') {
+					// Cloud API (OpenAI Compatible)
+					const apiKey = env.AI_TRANSCRIPTION_API_KEY || '';
+					const baseUrl = env.AI_TRANSCRIPTION_BASE_URL || 'https://api.openai.com/v1';
+					
+					logger.info(`[transcode-video-operation] (${filename}) Sending audio to Cloud API: ${baseUrl}`);
+					
+					const formData = new FormData();
+					const audioFile = new Blob([fs.readFileSync(audioTempPath)], { type: 'audio/wav' });
+					formData.append('file', audioFile, 'audio.wav');
+					formData.append('model', transcriptionModel);
+					formData.append('language', transcriptionLanguage);
+					formData.append('response_format', 'vtt');
+
+					const response = await fetch(`${baseUrl}/audio/transcriptions`, {
+						method: 'POST',
+						headers: {
+							'Authorization': `Bearer ${String(apiKey)}`,
+							'api-key': String(apiKey) // Fallback for Azure
+						},
+						body: formData
+					});
+
+					if (!response.ok) {
+						const errorText = await response.text();
+						throw new Error(`Cloud API Transcription failed (${response.status}): ${errorText}`);
+					}
+
+					vttContent = await response.text();
+				} else if (transcriptionEngine === 'local_transformers') {
+					// Local Engine (Transformers.js)
+					try {
+						// @ts-ignore - dynamic import
+						const { pipeline } = await import('@xenova/transformers');
+						logger.info(`[transcode-video-operation] (${filename}) Initializing local Transformers pipeline...`);
+						
+						const transcriber = await pipeline('automatic-speech-recognition', 'Xenova/whisper-small');
+						const result = await transcriber(audioTempPath, {
+							language: transcriptionLanguage,
+							task: 'transcribe',
+							chunk_length_s: 30,
+							stride_length_s: 5,
+							return_timestamps: true
+						});
+
+						vttContent = formatVtt(result.chunks);
+					} catch (importError: any) {
+						logger.error(`[transcode-video-operation] (${filename}) Local Transformers error: ${importError.message}`);
+						throw new Error(`Local transcription failed. Ensure @xenova/transformers is installed: ${importError.message}`);
+					}
+				}
+
+				if (vttContent) {
+					const vttFilename = `${filename}.vtt`;
+					const vttLocalPath = path.join(outputDir, vttFilename);
+					fs.writeFileSync(vttLocalPath, vttContent);
+					logger.info(`[transcode-video-operation] (${filename}) VTT file saved: ${vttLocalPath}`);
+
+					// Upload VTT to Directus
+					const vttUploadId = await uploadFileToDirectus(
+						vttLocalPath,
+						folder_id,
+						{ mimetype: 'text/vtt' }
+					);
+					transcriptId = vttUploadId;
+					logger.info(`[transcode-video-operation] (${filename}) VTT uploaded to Directus with ID: ${transcriptId}`);
+				}
+			} catch (transcriptionError: any) {
+				logger.error(`[transcode-video-operation] (${filename}) Transcription feature failed, but continuing with transcoding:`, transcriptionError.message);
+			} finally {
+				// Strict cleanup of temporary audio file
+				if (fs.existsSync(audioTempPath)) {
+					try {
+						fs.unlinkSync(audioTempPath);
+						logger.info(`[transcode-video-operation] (${filename}) Temporary audio file cleaned up: ${audioTempPath}`);
+					} catch (e) {
+						logger.warn(`[transcode-video-operation] (${filename}) Failed to cleanup audio temp:`, e);
+					}
+				}
+			}
+		}
+		// -------------------------------------
 
 		// Get optimized quality options with encryption
 		const allQualitiesRaw = getQualityOptionsRaw(isHighBitDepth, keyInfoPath);
