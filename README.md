@@ -11,6 +11,7 @@ This extension adds a custom operation to Directus Flows that automatically tran
 ## Features
 
 - **Adaptive HLS Streaming**: Transcodes videos to HLS format with multiple quality levels
+- **HLS AES-128 Encryption**: Automatically secures every video with a unique, randomly generated 16-byte encryption key
 - **Smart Quality Selection**: Automatically prevents upscaling - only transcodes qualities equal to or lower than source resolution
 - **Multiple Quality Levels**: Supports 240p, 480p, 720p, 1080p, and 2160p (4K)
 - **Automatic Thumbnail Extraction**: Extracts thumbnail image at 1 second from video
@@ -110,7 +111,13 @@ directus/extensions/directus-extension-transcode-video-operation/
   - Uses Directus folder selector interface with create capabilities
   - If not provided, a new folder will be created automatically
   - A subfolder with the video filename will be created automatically
-  - All transcoded segments, playlists, and thumbnails will be stored in this folder structure
+  - All transcoded segments, playlists, encryption keys, and thumbnails will be stored in this folder structure
+
+- **Key Base URL** (optional): The public URL prefix for the encryption key file
+  - Use this if you are serving keys via a separate secure endpoint or CDN
+  - Example: `https://keys.yoursite.com/video-keys`
+  - If provided, the `.m3u8` playlist will reference the key as `https://keys.yoursite.com/video-keys/filename.key`
+  - If left blank (default), a relative path `filename.key` will be used, which will run against Directus `/assets` endpoint if `Playlist Reference Type` is set to `id`.
 
 - **Quality Levels** (optional, default: all qualities): Select which quality levels to transcode
   - Available: 240p, 480p, 720p, 1080p, 2160p (4K)
@@ -191,14 +198,11 @@ folder/
   └── video-filename/
       ├── video-filename_240p.m3u8          # 240p quality playlist
       ├── video-filename_240p_000.ts        # 240p segments
-      ├── video-filename_240p_001.ts
       ├── video-filename_480p.m3u8          # 480p quality playlist
-      ├── video-filename_480p_000.ts        # 480p segments
       ├── video-filename_720p.m3u8          # 720p quality playlist
-      ├── video-filename_720p_000.ts        # 720p segments
       ├── video-filename_1080p.m3u8         # 1080p quality playlist
-      ├── video-filename_1080p_000.ts       # 1080p segments
       ├── video-filename_playlist.m3u8      # Master playlist (references all qualities)
+      ├── video-filename.key                # AES-128 binary encryption key
       └── video-filename_thumb.jpg          # Thumbnail image
 ```
 
@@ -248,16 +252,18 @@ The operation returns a JSON object with:
    - Resolves storage driver (local vs. cloud) from environment configuration
 4. **File Validation**: Checks that the input file exists and is accessible
 5. **Metadata Extraction**: Uses `ffprobe` to get video dimensions, duration, and bit depth
-6. **Quality Filtering**: Filters out quality levels that would require upscaling
-7. **Bit Depth Detection**: Detects 10-bit videos and adds pixel format conversion
-8. **Transcoding**: Uses `ffmpeg` to transcode each quality level sequentially
-   - Creates HLS segments (`.ts` files) and quality playlists (`.m3u8`)
-   - Uses H.264 codec with optimized settings for each quality
-   - Applies process priority (nice value) on Unix-like systems
-9. **Master Playlist**: Generates master playlist with bandwidth and resolution metadata
-10. **Thumbnail Extraction**: Extracts thumbnail at 1 second mark (if not already exists)
-11. **Folder Creation**: Creates Directus virtual folder structure for organization
-12. **File Upload**: 
+6. **Key Generation**: Generates a unique 16-byte random key for AES-128 encryption
+7. **Quality Filtering**: Filters out quality levels that would require upscaling
+8. **Bit Depth Detection**: Detects 10-bit videos and adds pixel format conversion
+9. **Transcoding**: Uses `ffmpeg` to transcode each quality level sequentially
+    - Applies AES-128 encryption using the generated key and a temporary `.keyinfo` file
+    - Creates HLS segments (`.ts` files) and quality playlists (`.m3u8`)
+    - Uses H.264 codec with optimized settings for each quality
+    - Applies process priority (nice value) on Unix-like systems
+10. **Master Playlist**: Generates master playlist with bandwidth and resolution metadata
+11. **Thumbnail Extraction**: Extracts thumbnail at 1 second mark (if not already exists)
+12. **Folder Creation**: Creates Directus virtual folder structure for organization
+13. **File Upload**: 
     - Checks for existing files to prevent duplicates
     - For cloud storage: Uploads files and cleans up local copies
     - For local storage: Files remain on disk
@@ -300,6 +306,24 @@ The operation automatically detects the source video resolution and only transco
 - **1080p source**: Only transcodes 240p, 480p, 720p, 1080p (skips 4K)
 - **720p source**: Only transcodes 240p, 480p, 720p (skips 1080p and 4K)
 - **4K source**: Transcodes all available quality levels
+
+## Environment Variables
+
+The operation requires several standard Directus environment variables to be correctly configured:
+
+- `STORAGE_LOCATIONS`: Needed to resolve all available storage locations.
+- `STORAGE_[LOCATION]_DRIVER`: Needed to distinguish between local and cloud storage.
+- `STORAGE_[LOCATION]_ROOT`: Required for local storage path resolution.
+- `PUBLIC_URL`: Used to construct the internal download URL when source files are on cloud storage.
+- `HOST` and `PORT`: Used as fallbacks if `PUBLIC_URL` is not defined.
+
+## Security Considerations
+
+> [!IMPORTANT]
+> The HLS AES-128 encryption key is stored in the same Directus folder as the video segments by default. To restrict unauthorized access to the encryption key, you should either:
+> 1. Set folder permissions in Directus to restrict visibility.
+> 2. Use a custom `Key Base URL` to point to a secure key server.
+> 3. Use a storage adapter that supports signed URLs or custom access control.
 
 ## Integration with Streaming Video Player
 
