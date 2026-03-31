@@ -2,6 +2,8 @@
 
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
+import os from 'os';
 import { exec } from "child_process";
 import https from 'https';
 import http from 'http';
@@ -43,6 +45,7 @@ interface File {
 interface OperationInput {
 	file: File | string;
 	folder_id?: string;
+	keyBaseUrl?: string;
 	playlist_reference_type?: 'id' | 'filename_disk';
 	qualities?: string[] | string;
 	threads?: number | string;
@@ -98,6 +101,7 @@ export default {
 		{ 
 			file, 
 			folder_id, 
+			keyBaseUrl,
 			playlist_reference_type = 'id', 
 			qualities = ['240p', '480p', '720p', '1080p', '2160p'], 
 			threads = 1,
@@ -215,33 +219,36 @@ export default {
 		let outputDir: string;
 		
 		// Function to generate optimized quality options for raw exec commands
-		const getQualityOptionsRaw = (isHighBitDepth = false): QualityOption[] => {
+		const getQualityOptionsRaw = (isHighBitDepth = false, keyInfoPath?: string): QualityOption[] => {
 			// Always use main profile for maximum compatibility
 			const profile = 'main';
 			
 			// Add pixel format conversion for high bit depth videos
 			const pixelFormat = isHighBitDepth ? 'format=yuv420p,' : '';
 			
+			// Add encryption options if keyInfoPath is provided
+			const encryptionOptions = keyInfoPath ? `-hls_key_info_file ${keyInfoPath}` : '';
+			
 			return [
 				{ 
 					id: 240, 
-					options: `-vf "${pixelFormat}scale=w='min(426,iw)':h='min(240,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 22 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 400k -maxrate 428k -bufsize 600k -b:a 64k -hls_segment_filename ${outputDir}/${filename}_240p_%03d.ts ${outputDir}/${filename}_240p.m3u8`
+					options: `-vf "${pixelFormat}scale=w='min(426,iw)':h='min(240,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 22 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 400k -maxrate 428k -bufsize 600k -b:a 64k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_240p_%03d.ts ${outputDir}/${filename}_240p.m3u8`
 				},
 				{ 
 					id: 480, 
-					options: `-vf "${pixelFormat}scale=w='min(854,iw)':h='min(480,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 1400k -maxrate 1498k -bufsize 2100k -b:a 128k -hls_segment_filename ${outputDir}/${filename}_480p_%03d.ts ${outputDir}/${filename}_480p.m3u8`
+					options: `-vf "${pixelFormat}scale=w='min(854,iw)':h='min(480,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 1400k -maxrate 1498k -bufsize 2100k -b:a 128k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_480p_%03d.ts ${outputDir}/${filename}_480p.m3u8`
 				},
 				{ 
 					id: 720, 
-					options: `-vf "${pixelFormat}scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 2800k -maxrate 2996k -bufsize 4200k -b:a 128k -hls_segment_filename ${outputDir}/${filename}_720p_%03d.ts ${outputDir}/${filename}_720p.m3u8`
+					options: `-vf "${pixelFormat}scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 2800k -maxrate 2996k -bufsize 4200k -b:a 128k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_720p_%03d.ts ${outputDir}/${filename}_720p.m3u8`
 				},
 				{ 
 					id: 1080, 
-					options: `-vf "${pixelFormat}scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 5000k -maxrate 5350k -bufsize 7500k -b:a 192k -hls_segment_filename ${outputDir}/${filename}_1080p_%03d.ts ${outputDir}/${filename}_1080p.m3u8`
+					options: `-vf "${pixelFormat}scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 5000k -maxrate 5350k -bufsize 7500k -b:a 192k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_1080p_%03d.ts ${outputDir}/${filename}_1080p.m3u8`
 				},
 				{ 
 					id: 2160, 
-					options: `-vf "${pixelFormat}scale=w='min(3840,iw)':h='min(2160,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 20000k -maxrate 21400k -bufsize 30000k -b:a 192k -hls_segment_filename ${outputDir}/${filename}_2160p_%03d.ts ${outputDir}/${filename}_2160p.m3u8`
+					options: `-vf "${pixelFormat}scale=w='min(3840,iw)':h='min(2160,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 20000k -maxrate 21400k -bufsize 30000k -b:a 192k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_2160p_%03d.ts ${outputDir}/${filename}_2160p.m3u8`
 				}
 			];
 		};
@@ -583,8 +590,26 @@ export default {
 			const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 			for (const line of lines) {
-				if (line.startsWith('#') || line.trim() === '') {
-					// Keep comments and empty lines as-is
+				if (line.startsWith('#EXT-X-KEY:')) {
+					// Handle encryption key tag: #EXT-X-KEY:METHOD=AES-128,URI="filename.key",IV=0x...
+					let newLine = line;
+					const uriMatch = line.match(/URI="([^"]+)"/);
+					if (uriMatch && uriMatch[1]) {
+						const originalKeyURI = uriMatch[1];
+						const keyBasename = path.basename(originalKeyURI);
+						
+						// Only replace if it's a relative path (not a full URL from keyBaseUrl)
+						// and we're using file IDs
+						if (!useFilenameDisk && !originalKeyURI.includes('://')) {
+							const keyId = fileIdMap[originalKeyURI] || fileIdMap[keyBasename];
+							if (keyId) {
+								newLine = line.replace(`URI="${originalKeyURI}"`, `URI="${keyId}"`);
+							}
+						}
+					}
+					newLines.push(newLine);
+				} else if (line.startsWith('#') || line.trim() === '') {
+					// Keep other comments and empty lines as-is
 					newLines.push(line);
 				} else {
 					// Replace filename with file ID or filename_disk (relative path, no /assets/ prefix)
@@ -953,9 +978,29 @@ export default {
 			await checkFFmpegAvailable();
 			logger.info(`[transcode-video-operation] (${filename}) FFmpeg is available`);
 		} catch (error) {
-			logger.error(`[transcode-video-operation] (${filename}) FFmpeg check failed: %s`, error instanceof Error ? error.message : String(error));
+			logger.info(`[transcode-video-operation] (${filename}) FFmpeg check failed: %s`, error instanceof Error ? error.message : String(error));
 			throw error;
 		}
+
+		// --- HLS AES-128 Encryption Support ---
+		let keyInfoPath: string | undefined = undefined;
+		const encryptionKey = crypto.randomBytes(16);
+		const keyFilename = `${filename}.key`;
+		const keyFileLocalPath = path.join(outputDir, keyFilename);
+		
+		// Save the raw key directly to the output directory
+		fs.writeFileSync(keyFileLocalPath, encryptionKey);
+		logger.info(`[transcode-video-operation] (${filename}) HLS encryption key generated: ${keyFileLocalPath}`);
+
+		// Determine keyURI for the manifest
+		const keyURI = keyBaseUrl ? `${keyBaseUrl.endsWith('/') ? keyBaseUrl.slice(0, -1) : keyBaseUrl}/${keyFilename}` : keyFilename;
+		
+		// Create temporary .keyinfo file
+		keyInfoPath = path.join(os.tmpdir(), `${filename}_${crypto.randomBytes(4).toString('hex')}.keyinfo`);
+		const keyInfoContent = `${keyURI}\n${keyFileLocalPath}`;
+		fs.writeFileSync(keyInfoPath, keyInfoContent);
+		logger.info(`[transcode-video-operation] (${filename}) HLS keyinfo file created: ${keyInfoPath}`);
+		// --------------------------------------
 
 		// Check if input is 10-bit by examining the video stream
 		const isHighBitDepth = await new Promise<boolean>((resolve, reject) => {
@@ -993,8 +1038,8 @@ export default {
 		const sourceHeight = sourceMetadata.height;
 		logger.info(`[transcode-video-operation] (${filename}) Source video resolution: ${sourceMetadata.width}x${sourceHeight}`);
 
-		// Get optimized quality options
-		const allQualitiesRaw = getQualityOptionsRaw(isHighBitDepth);
+		// Get optimized quality options with encryption
+		const allQualitiesRaw = getQualityOptionsRaw(isHighBitDepth, keyInfoPath);
 		
 		// Filter qualities based on user selection (default: all)
 		// Handle cases where qualities might be undefined, null, or not an array
@@ -1068,20 +1113,43 @@ export default {
 		
 		if (!hasFiles) {
 			logger.info(`[transcode-video-operation] (${filename}) No existing files found, starting transcoding...`);
-			// Process qualities sequentially to catch errors on the first quality level
-			for (const quality of qualitiesRaw) {
-				try {
-					logger.info(`[transcode-video-operation] (${filename}) Starting transcoding for quality: %sp`, quality.id);
-					await ffmpegRawSync(filePath, quality, validatedThreads, validatedNice);
-					logger.info(`[transcode-video-operation] (${filename}) Successfully transcoded quality: %sp`, quality.id);
-				} catch (error) {
-					logger.error(`[transcode-video-operation] (${filename}) Failed to transcode quality %sp:`, quality.id, error);
-					throw error; // Re-throw to abort the operation
+			
+			try {
+				// Process qualities sequentially to catch errors on the first quality level
+				for (const quality of qualitiesRaw) {
+					try {
+						logger.info(`[transcode-video-operation] (${filename}) Starting transcoding for quality: %sp`, quality.id);
+						await ffmpegRawSync(filePath, quality, validatedThreads, validatedNice);
+						logger.info(`[transcode-video-operation] (${filename}) Successfully transcoded quality: %sp`, quality.id);
+					} catch (error) {
+						logger.error(`[transcode-video-operation] (${filename}) Failed to transcode quality %sp:`, quality.id, error);
+						throw error; // Re-throw to abort the operation
+					}
+				}
+				logger.info(`[transcode-video-operation] (${filename}) All qualities transcoded successfully`);
+			} finally {
+				// Clean up temporary .keyinfo file
+				if (keyInfoPath && fs.existsSync(keyInfoPath)) {
+					try {
+						fs.unlinkSync(keyInfoPath);
+						logger.info(`[transcode-video-operation] (${filename}) HLS keyinfo file cleaned up: ${keyInfoPath}`);
+					} catch (cleanupError) {
+						logger.warn(`[transcode-video-operation] (${filename}) Error cleaning up HLS keyinfo file:`, cleanupError);
+					}
 				}
 			}
-			logger.info(`[transcode-video-operation] (${filename}) All qualities transcoded successfully`);
 		} else {
 			logger.info(`[transcode-video-operation] (${filename}) Transcoded files already exist, skipping transcoding`);
+			
+			// Even if skipping transcoding, we should clean up the keyinfo file we just created
+			if (keyInfoPath && fs.existsSync(keyInfoPath)) {
+				try {
+					fs.unlinkSync(keyInfoPath);
+					logger.info(`[transcode-video-operation] (${filename}) HLS keyinfo file cleaned up (skipped transcoding): ${keyInfoPath}`);
+				} catch (cleanupError) {
+					logger.warn(`[transcode-video-operation] (${filename}) Error cleaning up HLS keyinfo file:`, cleanupError);
+				}
+			}
 		}
 
 		// Generate master playlist dynamically based on available quality files
@@ -1233,6 +1301,21 @@ export default {
 				}
 			}
 		}
+
+		// --- Upload HLS Encryption Key ---
+		if (fs.existsSync(keyFileLocalPath)) {
+			try {
+				logger.info(`[transcode-video-operation] (${filename}) Uploading HLS encryption key: ${keyFilename}`);
+				const keyId = await uploadFileToDirectus(keyFileLocalPath, targetFolderId, {
+					mimetype: 'application/octet-stream'
+				});
+				fileIdMap[keyFilename] = keyId;
+				uploadedFiles.push({ filename_disk: keyFilename, id: keyId });
+			} catch (error) {
+				logger.error(`[transcode-video-operation] (${filename}) Error uploading HLS key ${keyFilename}:`, error);
+			}
+		}
+		// ----------------------------------
 
 		// Collect only segment files (not playlists) - we'll rebuild playlists with UUIDs after uploading segments
 		const segmentFiles = new Set<string>();

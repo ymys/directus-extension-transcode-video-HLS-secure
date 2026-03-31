@@ -44,6 +44,22 @@ export default {
 			},
 		},
 		{
+			field: 'keyBaseUrl',
+			name: 'Key Base URL',
+			type: 'string',
+			meta: {
+				width: 'half',
+				interface: 'input',
+				options: {
+					placeholder: 'https://cdn.example.com/keys',
+				},
+				note: 'Optional. The public URL prefix for the encryption key. If left blank, a relative path will be used.',
+			},
+			schema: {
+				required: false,
+			},
+		},
+		{
 			field: 'playlist_reference_type',
 			name: 'Playlist Reference Type',
 			type: 'string',
