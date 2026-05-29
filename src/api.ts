@@ -1079,13 +1079,21 @@ export default {
 
 		// --- HLS AES-128 Encryption Support ---
 		let keyInfoPath: string | undefined = undefined;
-		const encryptionKey = crypto.randomBytes(16);
 		const keyFilename = `${filename}.key`;
 		const keyFileLocalPath = path.join(outputDir, keyFilename);
 		
-		// Save the raw key directly to the output directory
-		fs.writeFileSync(keyFileLocalPath, encryptionKey);
-		logger.info(`[transcode-video-operation] (${filename}) HLS encryption key generated: ${keyFileLocalPath}`);
+		let encryptionKey: Buffer;
+		if (fs.existsSync(keyFileLocalPath)) {
+			// Load the existing key to avoid breaking existing encrypted segments!
+			encryptionKey = fs.readFileSync(keyFileLocalPath);
+			logger.info(`[transcode-video-operation] (${filename}) Existing HLS encryption key loaded from disk: ${keyFileLocalPath}`);
+		} else {
+			// Generate a new encryption key
+			encryptionKey = crypto.randomBytes(16);
+			// Save the raw key directly to the output directory
+			fs.writeFileSync(keyFileLocalPath, encryptionKey);
+			logger.info(`[transcode-video-operation] (${filename}) HLS encryption key generated: ${keyFileLocalPath}`);
+		}
 
 		// Determine keyURI for the manifest
 		const keyURI = keyBaseUrl ? `${keyBaseUrl.endsWith('/') ? keyBaseUrl.slice(0, -1) : keyBaseUrl}/${keyFilename}` : keyFilename;
