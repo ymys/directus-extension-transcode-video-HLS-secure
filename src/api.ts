@@ -52,6 +52,11 @@ interface OperationInput {
 	nice?: number | string;
 	storage_adapter?: 'default' | 'source' | 'custom';
 	target_storage?: string;
+	generate_captions?: boolean;
+	caption_language?: string;
+	caption_endpoint?: string;
+	caption_api_key?: string;
+	caption_api_type?: 'env' | 'openai' | 'azure';
 }
 
 interface QualityOption {
@@ -107,7 +112,12 @@ export default {
 			threads = 1,
 			nice,
 			storage_adapter = 'default',
-			target_storage
+			target_storage,
+			generate_captions = false,
+			caption_language,
+			caption_endpoint,
+			caption_api_key,
+			caption_api_type = 'env'
 		}: OperationInput, 
 		{ env, services, getSchema, logger }: OperationContext
 	): Promise<OperationResult | { error: string }> => {
@@ -743,6 +753,91 @@ export default {
 				})
 			})
 		}
+
+		const extractAudio = async (inputFile: string, outputPath: string, niceValue?: number): Promise<string> => {
+			return new Promise((resolve, reject) => {
+				logger.info(`[transcode-video-operation] (${filename}) Extracting audio track to: ${outputPath}`);
+				
+				const isWindows = process.platform === 'win32';
+				const nicePrefix = (!isWindows && niceValue !== undefined && niceValue !== null) ? `nice -n ${niceValue} ` : '';
+				const command = `${nicePrefix}ffmpeg -y -i ${inputFile} -vn -acodec libmp3lame -q:a 4 ${outputPath}`;
+				
+				exec(command, (error, stdout, stderr) => {
+					if (error) {
+						logger.error(`[transcode-video-operation] (${filename}) Error extracting audio track:`, error);
+						if (stderr) {
+							logger.error(`[transcode-video-operation] (${filename}) FFmpeg stderr: ${stderr}`);
+						}
+						reject(error);
+						return;
+					}
+					
+					if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size === 0) {
+						reject(new Error("Extracted audio file is missing or empty"));
+						return;
+					}
+					
+					logger.info(`[transcode-video-operation] (${filename}) Audio track extracted successfully`);
+					resolve(outputPath);
+				});
+			});
+		};
+
+		const transcribeAudio = async (audioPath: string): Promise<string> => {
+			const apiEndpoint = caption_endpoint || (env.TRANSCRIBE_API_ENDPOINT as string);
+			const apiKey = caption_api_key || (env.TRANSCRIBE_API_KEY as string);
+			let apiType = caption_api_type === 'env' ? (env.TRANSCRIBE_API_TYPE as string) : caption_api_type;
+			
+			if (!apiType || apiType === 'env') {
+				apiType = 'openai';
+			}
+
+			if (!apiEndpoint) {
+				throw new Error("API Endpoint for transcription is not configured. Please set TRANSCRIBE_API_ENDPOINT in .env or supply a Flow override.");
+			}
+			if (!apiKey) {
+				throw new Error("API Key for transcription is not configured. Please set TRANSCRIBE_API_KEY in .env or supply a Flow override.");
+			}
+
+			logger.info(`[transcode-video-operation] (${filename}) Transcribing audio using endpoint: ${apiEndpoint} (Type: ${apiType})`);
+
+			const audioData = fs.readFileSync(audioPath);
+			const audioBlob = new Blob([audioData], { type: 'audio/mpeg' });
+
+			const formData = new FormData();
+			formData.append('file', audioBlob, path.basename(audioPath));
+			formData.append('model', 'whisper');
+			formData.append('response_format', 'vtt');
+
+			if (caption_language) {
+				formData.append('language', caption_language);
+			}
+
+			const headers: Record<string, string> = {};
+			if (apiType === 'azure') {
+				headers['api-key'] = apiKey;
+			} else {
+				headers['Authorization'] = `Bearer ${apiKey}`;
+			}
+
+			const response = await fetch(apiEndpoint, {
+				method: 'POST',
+				headers,
+				body: formData
+			});
+
+			if (!response.ok) {
+				const errText = await response.text();
+				throw new Error(`Whisper API transcription failed (HTTP ${response.status}): ${errText}`);
+			}
+
+			const vttResult = await response.text();
+			if (!vttResult || vttResult.trim().length === 0) {
+				throw new Error("Transcription returned empty response");
+			}
+
+			return vttResult;
+		};
 	
 		/* Start of the script */
 		logger.info(`[transcode-video-operation] (${filename}) Operation started`);
@@ -1483,6 +1578,49 @@ export default {
 			const masterAction = targetStorageDriver === 'local' ? 'registering' : 'uploading';
 			logger.error(`[transcode-video-operation] (${filename}) Error ${masterAction} master playlist:`, error);
 		}
+
+		// AI Caption Generation
+		let subtitleId: string | null = null;
+		let tempAudioPath: string | null = null;
+
+		if (generate_captions) {
+			try {
+				logger.info(`[transcode-video-operation] (${filename}) Initiating AI subtitle generation...`);
+				
+				const tempDir = path.join(process.env.PWD || '/directus', 'tmp', 'transcode');
+				if (!fs.existsSync(tempDir)) {
+					fs.mkdirSync(tempDir, { recursive: true, mode: 0o755 });
+				}
+				tempAudioPath = path.join(tempDir, `${filename}_temp_audio.mp3`);
+				
+				// 1. Extract audio track from video
+				await extractAudio(filePath, tempAudioPath, validatedNice);
+				
+				// 2. Transcribe audio to WebVTT subtitle
+				const vttContent = await transcribeAudio(tempAudioPath);
+				
+				// 3. Save WebVTT file to target outputDir
+				const subtitleFilename = `${filename}_subtitle.vtt`;
+				const subtitleLocalPath = path.join(outputDir, subtitleFilename);
+				fs.writeFileSync(subtitleLocalPath, vttContent);
+				logger.info(`[transcode-video-operation] (${filename}) Subtitle file saved locally: ${subtitleLocalPath}`);
+				
+				// 4. Upload WebVTT file to Directus
+				logger.info(`[transcode-video-operation] (${filename}) Uploading subtitle file to Directus folder...`);
+				subtitleId = await uploadFileToDirectus(subtitleLocalPath, targetFolderId, {
+					mimetype: 'text/vtt'
+				});
+				
+				if (subtitleId) {
+					fileIdMap[subtitleFilename] = subtitleId;
+					uploadedFiles.push({ filename_disk: subtitleFilename, id: subtitleId });
+					logger.info(`[transcode-video-operation] (${filename}) Subtitle uploaded successfully. ID: ${subtitleId}`);
+				}
+			} catch (captionError) {
+				logger.error(`[transcode-video-operation] (${filename}) Caption generation failed:`, captionError);
+				// Do not throw; let the core video transcode operation succeed
+			}
+		}
 		
 		const filesAction = targetStorageDriver === 'local' ? 'registered' : 'uploaded';
 		logger.info(`[transcode-video-operation] (${filename}) All files ${filesAction} to Directus: ${uploadedFiles.length} files total`);
@@ -1524,6 +1662,18 @@ export default {
 			}
 		}
 
+		// Clean up temporary audio track
+		if (tempAudioPath) {
+			try {
+				if (fs.existsSync(tempAudioPath)) {
+					fs.unlinkSync(tempAudioPath);
+					logger.info(`[transcode-video-operation] (${filename}) Temporary audio track cleaned up: ${tempAudioPath}`);
+				}
+			} catch (error) {
+				logger.warn(`[transcode-video-operation] (${filename}) Could not delete temporary audio track ${tempAudioPath}:`, error);
+			}
+		}
+
 		// Determine available qualities
 		const availableQualities: number[] = [];
 		for (const quality of qualitiesRaw) {
@@ -1543,7 +1693,8 @@ export default {
 					isVertical: metadata.isVertical
 				},
 				duration: metadata.duration,
-				thumbnail: thumbnailId
+				thumbnail: thumbnailId,
+				subtitle: subtitleId
 			},
 			files: uploadedFiles
 		};

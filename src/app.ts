@@ -211,6 +211,142 @@ export default {
 				default_value: 19,
 				required: false
 			}
+		},
+		{
+			field: 'captions_divider',
+			name: 'AI Caption Settings',
+			type: 'alias',
+			meta: {
+				width: 'full',
+				interface: 'presentation-divider',
+				special: ['alias', 'no-data'],
+				options: {
+					title: 'AI Caption Settings'
+				}
+			},
+			schema: {}
+		},
+		{
+			field: 'generate_captions',
+			name: 'Generate Captions (AI)',
+			type: 'boolean',
+			meta: {
+				width: 'half',
+				interface: 'boolean',
+				note: 'Automatically generate subtitles/captions using AI Whisper model.'
+			},
+			schema: {
+				default_value: false
+			}
+		},
+		{
+			field: 'caption_language',
+			name: 'Caption Language',
+			type: 'string',
+			meta: {
+				width: 'half',
+				interface: 'input',
+				options: {
+					placeholder: 'e.g. en, es, id (blank for auto)'
+				},
+				note: 'ISO 639-1 code of language. Leave blank for Whisper auto-detection.',
+				conditions: [
+					{
+						name: 'Hide when generate_captions is false',
+						rule: {
+							generate_captions: {
+								_eq: false
+							}
+						},
+						hidden: true
+					}
+				]
+			},
+			schema: {
+				required: false
+			}
+		},
+		{
+			field: 'caption_endpoint',
+			name: 'API Endpoint Override',
+			type: 'string',
+			meta: {
+				width: 'half',
+				interface: 'input',
+				options: {
+					placeholder: 'https://...'
+				},
+				note: 'Optional override for the AI Whisper API Endpoint. If left blank, environment default will be used.',
+				conditions: [
+					{
+						name: 'Hide when generate_captions is false',
+						rule: {
+							generate_captions: {
+								_eq: false
+							}
+						},
+						hidden: true
+					}
+				]
+			},
+			schema: {
+				required: false
+			}
+		},
+		{
+			field: 'caption_api_key',
+			name: 'API Key Override',
+			type: 'string',
+			meta: {
+				width: 'half',
+				interface: 'input-password',
+				note: 'Optional override for the AI Whisper API key.',
+				conditions: [
+					{
+						name: 'Hide when generate_captions is false',
+						rule: {
+							generate_captions: {
+								_eq: false
+							}
+						},
+						hidden: true
+					}
+				]
+			},
+			schema: {
+				required: false
+			}
+		},
+		{
+			field: 'caption_api_type',
+			name: 'API Authentication Type',
+			type: 'string',
+			meta: {
+				width: 'half',
+				interface: 'select-dropdown',
+				options: {
+					choices: [
+						{ text: 'Use environment configuration (default)', value: 'env' },
+						{ text: 'OpenAI (Authorization: Bearer header)', value: 'openai' },
+						{ text: 'Azure OpenAI (api-key header)', value: 'azure' }
+					]
+				},
+				note: 'Authentication header format strategy.',
+				conditions: [
+					{
+						name: 'Hide when generate_captions is false',
+						rule: {
+							generate_captions: {
+								_eq: false
+							}
+						},
+						hidden: true
+					}
+				]
+			},
+			schema: {
+				default_value: 'env'
+			}
 		}
 	],
 };
