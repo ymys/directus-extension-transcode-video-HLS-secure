@@ -347,6 +347,136 @@ export default {
 			schema: {
 				default_value: 'env'
 			}
+		},
+		{
+			field: 'speech2text_divider',
+			name: 'AI Speech2Text Settings',
+			type: 'alias',
+			meta: {
+				width: 'full',
+				interface: 'presentation-divider',
+				special: ['alias', 'no-data'],
+				options: {
+					title: 'AI Speech2Text Settings'
+				}
+			},
+			schema: {}
+		},
+		{
+			field: 'generate_speech2text',
+			name: 'Generate Speech2Text (Azure Batch)',
+			type: 'boolean',
+			meta: {
+				width: 'half',
+				interface: 'boolean',
+				note: 'Extract and permanently save audio, then generate SRT subtitles using Azure Speech-to-Text batch transcription.'
+			},
+			schema: {
+				default_value: false
+			}
+		},
+		{
+			field: 'speech2text_locale',
+			name: 'Speech2Text Locale',
+			type: 'string',
+			meta: {
+				width: 'half',
+				interface: 'input',
+				options: {
+					placeholder: 'e.g. id-ID, en-US (default: id-ID)'
+				},
+				note: 'The locale/language code for transcription.',
+				conditions: [
+					{
+						name: 'Hide when generate_speech2text is false',
+						rule: {
+							generate_speech2text: {
+								_eq: false
+							}
+						},
+						hidden: true
+					}
+				]
+			},
+			schema: {
+				default_value: 'id-ID',
+				required: false
+			}
+		},
+		{
+			field: 'speech2text_endpoint',
+			name: 'Speech2Text Endpoint Override',
+			type: 'string',
+			meta: {
+				width: 'half',
+				interface: 'input',
+				options: {
+					placeholder: 'https://swedencentral.api.cognitive.microsoft.com/speechtotext/v3.2/transcriptions'
+				},
+				note: 'Optional. URL for the Azure Speech-to-Text batch transcription API.',
+				conditions: [
+					{
+						name: 'Hide when generate_speech2text is false',
+						rule: {
+							generate_speech2text: {
+								_eq: false
+							}
+						},
+						hidden: true
+					}
+				]
+			},
+			schema: {
+				required: false
+			}
+		},
+		{
+			field: 'speech2text_subscription_key',
+			name: 'Speech2Text Subscription Key',
+			type: 'string',
+			meta: {
+				width: 'half',
+				interface: 'input-password',
+				note: 'Optional override for the Azure subscription API key (Ocp-Apim-Subscription-Key). If left blank, environment variable SPEECH2TEXT_SUBSCRIPTION_KEY is used.',
+				conditions: [
+					{
+						name: 'Hide when generate_speech2text is false',
+						rule: {
+							generate_speech2text: {
+								_eq: false
+							}
+						},
+						hidden: true
+					}
+				]
+			},
+			schema: {
+				required: false
+			}
+		},
+		{
+			field: 'speech2text_diarization',
+			name: 'Speech2Text Diarization',
+			type: 'boolean',
+			meta: {
+				width: 'half',
+				interface: 'boolean',
+				note: 'Identify different speakers (diarization).',
+				conditions: [
+					{
+						name: 'Hide when generate_speech2text is false',
+						rule: {
+							generate_speech2text: {
+								_eq: false
+							}
+						},
+						hidden: true
+					}
+				]
+			},
+			schema: {
+				default_value: true
+			}
 		}
 	],
 };

@@ -57,6 +57,11 @@ interface OperationInput {
 	caption_endpoint?: string;
 	caption_api_key?: string;
 	caption_api_type?: 'env' | 'openai' | 'azure';
+	generate_speech2text?: boolean;
+	speech2text_subscription_key?: string;
+	speech2text_endpoint?: string;
+	speech2text_locale?: string;
+	speech2text_diarization?: boolean;
 }
 
 interface QualityOption {
@@ -95,6 +100,9 @@ interface OperationResult {
 		};
 		duration: number;
 		thumbnail: string | null;
+		subtitle: string | null;
+		audio?: string | null;
+		s2t_subtitle?: string | null;
 	};
 	files: UploadedFile[];
 	error?: string;
@@ -117,7 +125,12 @@ export default {
 			caption_language,
 			caption_endpoint,
 			caption_api_key,
-			caption_api_type = 'env'
+			caption_api_type = 'env',
+			generate_speech2text = false,
+			speech2text_subscription_key,
+			speech2text_endpoint,
+			speech2text_locale = 'id-ID',
+			speech2text_diarization = true
 		}: OperationInput, 
 		{ env, services, getSchema, logger }: OperationContext
 	): Promise<OperationResult | { error: string }> => {
@@ -158,6 +171,30 @@ export default {
 
 		const filename = fileObject.filename_disk.split(('.'))[0];
 		const extension = fileObject.filename_disk.substr(fileObject.filename_disk.lastIndexOf('.') + 1);
+
+		// Resolve baseUrl early for both downloading source files and constructing S2T callback URLs
+		const getHostPort = (): string => {
+			const host = env.HOST && typeof env.HOST === 'string' && env.HOST.trim() !== '' 
+				? (env.HOST.trim() === '0.0.0.0' ? 'localhost' : env.HOST.trim())
+				: 'localhost';
+			const port = env.PORT && typeof env.PORT === 'string' && env.PORT.trim() !== ''
+				? env.PORT.trim()
+				: (env.PORT && typeof env.PORT === 'number' ? String(env.PORT) : '8055');
+			return `http://${host}:${port}`;
+		};
+		
+		let baseUrl: string;
+		const publicUrlRaw = env.PUBLIC_URL;
+		if (publicUrlRaw && typeof publicUrlRaw === 'string') {
+			const trimmed = publicUrlRaw.trim();
+			if (trimmed === '' || trimmed === '/') {
+				baseUrl = getHostPort();
+			} else {
+				baseUrl = trimmed.endsWith('/') ? trimmed.slice(0, -1) : trimmed;
+			}
+		} else {
+			baseUrl = getHostPort();
+		}
 
 		// Get available storage locations from environment (STORAGE_LOCATIONS can be CSV string or array)
 		const storageLocations = env.STORAGE_LOCATIONS 
@@ -838,6 +875,56 @@ export default {
 
 			return vttResult;
 		};
+
+		const convertAzureJsonToSrt = (jsonData: any): string => {
+			let srt = "";
+			let index = 1;
+			const phrases = jsonData.recognizedPhrases || [];
+
+			const parseOffset = (offsetStr: string | undefined, offsetInTicks: number | undefined): number => {
+				if (offsetInTicks !== undefined && offsetInTicks !== null) {
+					return offsetInTicks / 10000;
+				}
+				if (!offsetStr) return 0;
+				const match = offsetStr.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:([\d.]+)S)?/);
+				if (!match) return 0;
+				const hours = parseFloat(match[1] || '0');
+				const minutes = parseFloat(match[2] || '0');
+				const seconds = parseFloat(match[3] || '0');
+				return ((hours * 3600) + (minutes * 60) + seconds) * 1000;
+			};
+
+			const formatSrtTime = (ms: number): string => {
+				const hours = Math.floor(ms / 3600000);
+				const minutes = Math.floor((ms % 3600000) / 60000);
+				const seconds = Math.floor((ms % 60000) / 1000);
+				const milliseconds = Math.floor(ms % 1000);
+				const pad = (num: number, size: number) => String(num).padStart(size, '0');
+				return `${pad(hours, 2)}:${pad(minutes, 2)}:${pad(seconds, 2)},${pad(milliseconds, 3)}`;
+			};
+
+			for (const phrase of phrases) {
+				const startMs = parseOffset(phrase.offset, phrase.offsetInTicks);
+				const durationMs = parseOffset(phrase.duration, phrase.durationInTicks);
+				const endMs = startMs + durationMs;
+
+				const startTimeStr = formatSrtTime(startMs);
+				const endTimeStr = formatSrtTime(endMs);
+
+				const display = phrase.nBest?.[0]?.display || "";
+				const speaker = phrase.speaker;
+
+				const speakerPrefix = speaker !== undefined ? `Speaker ${speaker}: ` : "";
+				const text = `${speakerPrefix}${display}`.trim();
+
+				if (text) {
+					srt += `${index}\n${startTimeStr} --> ${endTimeStr}\n${text}\n\n`;
+					index++;
+				}
+			}
+
+			return srt;
+		};
 	
 		/* Start of the script */
 		logger.info(`[transcode-video-operation] (${filename}) Operation started`);
@@ -940,37 +1027,7 @@ export default {
 				const tempFilePath = path.join(tempDir, `${fileId}_${fileObject.filename_disk}`);
 				tempSourceFile = tempFilePath;
 
-				// Validate and construct the asset URL
-				// If PUBLIC_URL is "/" or empty, fallback to HOST + PORT
-				// Otherwise, use PUBLIC_URL as-is
-				const publicUrlRaw = env.PUBLIC_URL;
-				
-				// Helper to get HOST:PORT for fallback
-				const getHostPort = (): string => {
-					// HOST '0.0.0.0' means listen on all interfaces, but for internal requests use 'localhost'
-					const host = env.HOST && typeof env.HOST === 'string' && env.HOST.trim() !== '' 
-						? (env.HOST.trim() === '0.0.0.0' ? 'localhost' : env.HOST.trim())
-						: 'localhost';
-					const port = env.PORT && typeof env.PORT === 'string' && env.PORT.trim() !== ''
-						? env.PORT.trim()
-						: (env.PORT && typeof env.PORT === 'number' ? String(env.PORT) : '8055');
-					return `http://${host}:${port}`;
-				};
-				
-				let baseUrl: string;
-				if (publicUrlRaw && typeof publicUrlRaw === 'string') {
-					const trimmed = publicUrlRaw.trim();
-					// If it's just '/' or empty, fallback to HOST + PORT
-					if (trimmed === '' || trimmed === '/') {
-						baseUrl = getHostPort();
-					} else {
-						// Use PUBLIC_URL as-is (should be a full URL)
-						baseUrl = trimmed.endsWith('/') ? trimmed.slice(0, -1) : trimmed;
-					}
-				} else {
-					// No PUBLIC_URL set, fallback to HOST + PORT
-					baseUrl = getHostPort();
-				}
+				// baseUrl is resolved at the top of the handler
 				
 				if (!fileId || typeof fileId !== 'string' || fileId.trim() === '') {
 					logger.error(`[transcode-video-operation] (${filename}) Invalid fileId: ${fileId}`);
@@ -1587,14 +1644,14 @@ export default {
 			logger.error(`[transcode-video-operation] (${filename}) Error ${masterAction} master playlist:`, error);
 		}
 
-		// AI Caption Generation
+		// AI Caption & Speech2Text Generation
 		let subtitleId: string | null = null;
+		let audioId: string | null = null;
+		let s2tSubtitleId: string | null = null;
 		let tempAudioPath: string | null = null;
 
-		if (generate_captions) {
+		if (generate_captions || generate_speech2text) {
 			try {
-				logger.info(`[transcode-video-operation] (${filename}) Initiating AI subtitle generation...`);
-				
 				const tempDir = path.join(process.env.PWD || '/directus', 'tmp', 'transcode');
 				if (!fs.existsSync(tempDir)) {
 					fs.mkdirSync(tempDir, { recursive: true, mode: 0o755 });
@@ -1603,6 +1660,14 @@ export default {
 				
 				// 1. Extract audio track from video
 				await extractAudio(filePath, tempAudioPath, validatedNice);
+			} catch (extractError) {
+				logger.error(`[transcode-video-operation] (${filename}) Audio extraction failed: %s`, extractError instanceof Error ? extractError.stack || extractError.message : String(extractError));
+			}
+		}
+
+		if (generate_captions && tempAudioPath && fs.existsSync(tempAudioPath)) {
+			try {
+				logger.info(`[transcode-video-operation] (${filename}) Initiating AI subtitle generation...`);
 				
 				// 2. Transcribe audio to WebVTT subtitle
 				const vttContent = await transcribeAudio(tempAudioPath);
@@ -1625,8 +1690,194 @@ export default {
 					logger.info(`[transcode-video-operation] (${filename}) Subtitle uploaded successfully. ID: ${subtitleId}`);
 				}
 			} catch (captionError) {
-				logger.error(`[transcode-video-operation] (${filename}) Caption generation failed:`, captionError);
-				// Do not throw; let the core video transcode operation succeed
+				logger.error(`[transcode-video-operation] (${filename}) Caption generation failed: %s`, captionError instanceof Error ? captionError.stack || captionError.message : String(captionError));
+			}
+		}
+
+		if (generate_speech2text && tempAudioPath && fs.existsSync(tempAudioPath)) {
+			let jobSelfUrl: string | null = null;
+			let subscriptionKey: string | null = null;
+			try {
+				logger.info(`[transcode-video-operation] (${filename}) Initiating AI Speech2Text flow...`);
+				
+				// Save audio permanently in target folder
+				const audioFilename = `${filename}_audio.mp3`;
+				const permanentAudioPath = path.join(outputDir, audioFilename);
+				
+				// Copy/move temporary audio to outputDir
+				fs.copyFileSync(tempAudioPath, permanentAudioPath);
+				logger.info(`[transcode-video-operation] (${filename}) Permanent audio file saved locally: ${permanentAudioPath}`);
+				
+				// Upload audio to Directus
+				logger.info(`[transcode-video-operation] (${filename}) Uploading permanent audio to Directus folder...`);
+				audioId = await uploadFileToDirectus(permanentAudioPath, targetFolderId, {
+					mimetype: 'audio/mpeg'
+				});
+				
+				if (audioId) {
+					fileIdMap[audioFilename] = audioId;
+					uploadedFiles.push({ filename_disk: audioFilename, id: audioId });
+					logger.info(`[transcode-video-operation] (${filename}) Permanent audio uploaded successfully. ID: ${audioId}`);
+				} else {
+					throw new Error("Failed to upload permanent audio file to Directus");
+				}
+				
+				// Submit Speech2Text job to Azure
+				const speech2textUrl = speech2text_endpoint || 'https://swedencentral.api.cognitive.microsoft.com/speechtotext/v3.2/transcriptions';
+				subscriptionKey = speech2text_subscription_key || (env.SPEECH2TEXT_SUBSCRIPTION_KEY as string);
+				
+				if (!subscriptionKey) {
+					throw new Error("Azure Speech2Text subscription key is not configured.");
+				}
+				
+				const s2tPayload = {
+					contentUrls: [
+						`${baseUrl}/assets/${audioId}.mp3`
+					],
+					locale: speech2text_locale || 'id-ID',
+					displayName: `${filename}_s2t`,
+					properties: {
+						diarizationEnabled: speech2text_diarization !== undefined ? speech2text_diarization : true,
+						outputFormations: [
+							{
+								format: "SRT"
+							}
+						]
+					}
+				};
+				
+				logger.info(`[transcode-video-operation] (${filename}) Submitting Speech2Text job to Azure Speech Services: ${speech2textUrl}`);
+				
+				const postResponse = await fetch(speech2textUrl, {
+					method: 'POST',
+					headers: {
+						'Ocp-Apim-Subscription-Key': subscriptionKey,
+						'Content-Type': 'application/json'
+					},
+					body: JSON.stringify(s2tPayload)
+				});
+				
+				if (!postResponse.ok) {
+					const errText = await postResponse.text();
+					throw new Error(`Speech2Text job submission failed (HTTP ${postResponse.status}): ${errText}`);
+				}
+				
+				const jobData = await postResponse.json() as any;
+				jobSelfUrl = jobData.self;
+				const jobFilesUrl = jobData.links?.files;
+				
+				if (!jobSelfUrl) {
+					throw new Error("Speech2Text response missing job self URL");
+				}
+				
+				logger.info(`[transcode-video-operation] (${filename}) Speech2Text job submitted. Self URL: ${jobSelfUrl}`);
+				
+				// Poll status until Succeeded or Failed
+				let status = jobData.status || 'NotStarted';
+				const pollIntervalMs = 5000;
+				const maxPollTimeMs = 600000; // 10 minutes timeout
+				let elapsedMs = 0;
+				
+				while (status !== 'Succeeded' && status !== 'Failed') {
+					if (elapsedMs >= maxPollTimeMs) {
+						throw new Error(`Speech2Text job timed out after ${maxPollTimeMs / 1000} seconds`);
+					}
+					
+					await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+					elapsedMs += pollIntervalMs;
+					
+					const pollResponse = await fetch(jobSelfUrl, {
+						headers: {
+							'Ocp-Apim-Subscription-Key': subscriptionKey
+						}
+					});
+					
+					if (!pollResponse.ok) {
+						logger.warn(`[transcode-video-operation] (${filename}) Failed to poll Speech2Text job status (HTTP ${pollResponse.status})`);
+						continue;
+					}
+					
+					const pollData = await pollResponse.json() as any;
+					status = pollData.status;
+					logger.info(`[transcode-video-operation] (${filename}) Polling Speech2Text job status... Status: ${status}`);
+				}
+				
+				if (status === 'Failed') {
+					throw new Error("Speech2Text job failed on Azure Speech Services");
+				}
+				
+				// Get files from files endpoint
+				const filesUrl = jobFilesUrl || `${jobSelfUrl}/files`;
+				logger.info(`[transcode-video-operation] (${filename}) Fetching Speech2Text job files list from ${filesUrl}`);
+				
+				const filesResponse = await fetch(filesUrl, {
+					headers: {
+						'Ocp-Apim-Subscription-Key': subscriptionKey
+					}
+				});
+				
+				if (!filesResponse.ok) {
+					throw new Error(`Failed to fetch Speech2Text files (HTTP ${filesResponse.status})`);
+				}
+				
+				const filesData = await filesResponse.json() as any;
+				const filesList = filesData.values || [];
+				const transcriptionFile = filesList.find((f: any) => f.name === 'contenturl_0.json' || f.kind === 'Transcription');
+				
+				if (!transcriptionFile || !transcriptionFile.links?.contentUrl) {
+					throw new Error("Could not find transcription contenturl_0.json file in job files list");
+				}
+				
+				const contentUrl = transcriptionFile.links.contentUrl;
+				logger.info(`[transcode-video-operation] (${filename}) Downloading transcription JSON from SAS URL: ${contentUrl}`);
+				
+				// Download transcription JSON content
+				const contentResponse = await fetch(contentUrl);
+				if (!contentResponse.ok) {
+					throw new Error(`Failed to download transcription JSON from SAS URL (HTTP ${contentResponse.status})`);
+				}
+				
+				const transcriptionJson = await contentResponse.json() as any;
+				
+				// Convert to SRT
+				logger.info(`[transcode-video-operation] (${filename}) Converting transcription JSON to SRT format...`);
+				const srtContent = convertAzureJsonToSrt(transcriptionJson);
+				
+				// Save SRT file to target outputDir
+				const s2tSubtitleFilename = `${filename}_s2t_subtitle.srt`;
+				const s2tSubtitleLocalPath = path.join(outputDir, s2tSubtitleFilename);
+				fs.writeFileSync(s2tSubtitleLocalPath, srtContent);
+				logger.info(`[transcode-video-operation] (${filename}) Speech2Text subtitle saved locally: ${s2tSubtitleLocalPath}`);
+				
+				// Upload SRT to Directus
+				logger.info(`[transcode-video-operation] (${filename}) Uploading Speech2Text subtitle file to Directus folder...`);
+				s2tSubtitleId = await uploadFileToDirectus(s2tSubtitleLocalPath, targetFolderId, {
+					mimetype: 'application/x-subrip'
+				});
+				
+				if (s2tSubtitleId) {
+					fileIdMap[s2tSubtitleFilename] = s2tSubtitleId;
+					uploadedFiles.push({ filename_disk: s2tSubtitleFilename, id: s2tSubtitleId });
+					logger.info(`[transcode-video-operation] (${filename}) Speech2Text subtitle uploaded successfully. ID: ${s2tSubtitleId}`);
+				}
+			} catch (s2tError) {
+				logger.error(`[transcode-video-operation] (${filename}) Speech2Text flow failed: %s`, s2tError instanceof Error ? s2tError.stack || s2tError.message : String(s2tError));
+			} finally {
+				// Clean up the Azure Speech job if created
+				if (jobSelfUrl && subscriptionKey) {
+					try {
+						logger.info(`[transcode-video-operation] (${filename}) Cleaning up Azure Speech2Text transcription job...`);
+						await fetch(jobSelfUrl, {
+							method: 'DELETE',
+							headers: {
+								'Ocp-Apim-Subscription-Key': subscriptionKey
+							}
+						});
+						logger.info(`[transcode-video-operation] (${filename}) Azure Speech2Text job cleaned up successfully`);
+					} catch (deleteError) {
+						logger.warn(`[transcode-video-operation] (${filename}) Failed to delete Azure Speech2Text job:`, deleteError);
+					}
+				}
 			}
 		}
 		
@@ -1702,7 +1953,9 @@ export default {
 				},
 				duration: metadata.duration,
 				thumbnail: thumbnailId,
-				subtitle: subtitleId
+				subtitle: subtitleId,
+				audio: audioId,
+				s2t_subtitle: s2tSubtitleId
 			},
 			files: uploadedFiles
 		};
