@@ -455,6 +455,30 @@ export default {
 			}
 		},
 		{
+			field: 'speech2text_access_token',
+			name: 'Speech2Text Directus Access Token',
+			type: 'string',
+			meta: {
+				width: 'half',
+				interface: 'input-password',
+				note: 'Optional. Directus static access token to append to the audio URL, allowing Azure to download private assets.',
+				conditions: [
+					{
+						name: 'Hide when generate_speech2text is false',
+						rule: {
+							generate_speech2text: {
+								_eq: false
+							}
+						},
+						hidden: true
+					}
+				]
+			},
+			schema: {
+				required: false
+			}
+		},
+		{
 			field: 'speech2text_diarization',
 			name: 'Speech2Text Diarization',
 			type: 'boolean',

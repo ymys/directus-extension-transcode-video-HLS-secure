@@ -62,6 +62,7 @@ interface OperationInput {
 	speech2text_endpoint?: string;
 	speech2text_locale?: string;
 	speech2text_diarization?: boolean;
+	speech2text_access_token?: string;
 }
 
 interface QualityOption {
@@ -103,6 +104,7 @@ interface OperationResult {
 		subtitle: string | null;
 		audio?: string | null;
 		s2t_subtitle?: string | null;
+		s2t_error?: string | null;
 	};
 	files: UploadedFile[];
 	error?: string;
@@ -130,7 +132,8 @@ export default {
 			speech2text_subscription_key,
 			speech2text_endpoint,
 			speech2text_locale = 'id-ID',
-			speech2text_diarization = true
+			speech2text_diarization = true,
+			speech2text_access_token
 		}: OperationInput, 
 		{ env, services, getSchema, logger }: OperationContext
 	): Promise<OperationResult | { error: string }> => {
@@ -1648,6 +1651,7 @@ export default {
 		let subtitleId: string | null = null;
 		let audioId: string | null = null;
 		let s2tSubtitleId: string | null = null;
+		let s2tErrorMessage: string | null = null;
 		let tempAudioPath: string | null = null;
 
 		if (generate_captions || generate_speech2text) {
@@ -1730,9 +1734,13 @@ export default {
 					throw new Error("Azure Speech2Text subscription key is not configured.");
 				}
 				
+				const audioUrl = speech2text_access_token
+					? `${baseUrl}/assets/${audioId}.mp3?access_token=${speech2text_access_token}`
+					: `${baseUrl}/assets/${audioId}.mp3`;
+
 				const s2tPayload = {
 					contentUrls: [
-						`${baseUrl}/assets/${audioId}.mp3`
+						audioUrl
 					],
 					locale: speech2text_locale || 'id-ID',
 					displayName: `${filename}_s2t`,
@@ -1861,6 +1869,7 @@ export default {
 					logger.info(`[transcode-video-operation] (${filename}) Speech2Text subtitle uploaded successfully. ID: ${s2tSubtitleId}`);
 				}
 			} catch (s2tError) {
+				s2tErrorMessage = s2tError instanceof Error ? s2tError.message : String(s2tError);
 				logger.error(`[transcode-video-operation] (${filename}) Speech2Text flow failed: %s`, s2tError instanceof Error ? s2tError.stack || s2tError.message : String(s2tError));
 			} finally {
 				// Clean up the Azure Speech job if created
@@ -1955,7 +1964,8 @@ export default {
 				thumbnail: thumbnailId,
 				subtitle: subtitleId,
 				audio: audioId,
-				s2t_subtitle: s2tSubtitleId
+				s2t_subtitle: s2tSubtitleId,
+				s2t_error: s2tErrorMessage
 			},
 			files: uploadedFiles
 		};
