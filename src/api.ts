@@ -800,7 +800,12 @@ export default {
 				
 				const isWindows = process.platform === 'win32';
 				const nicePrefix = (!isWindows && niceValue !== undefined && niceValue !== null) ? `nice -n ${niceValue} ` : '';
-				const command = `${nicePrefix}ffmpeg -y -i ${inputFile} -vn -acodec libmp3lame -q:a 4 ${outputPath}`;
+				
+				// Azure Speech-to-Text requires mono audio when diarization is enabled.
+				// Forcing mono (1 channel) and 16kHz sample rate standardizes audio for transcription.
+				const isMonoRequired = generate_speech2text && speech2text_diarization;
+				const audioParams = isMonoRequired ? '-ac 1 -ar 16000' : '';
+				const command = `${nicePrefix}ffmpeg -y -i ${inputFile} -vn -acodec libmp3lame ${audioParams} -q:a 4 ${outputPath}`;
 				
 				exec(command, (error, stdout, stderr) => {
 					if (error) {
@@ -1785,6 +1790,7 @@ export default {
 				const pollIntervalMs = 5000;
 				const maxPollTimeMs = 600000; // 10 minutes timeout
 				let elapsedMs = 0;
+				let lastPollData = jobData;
 				
 				while (status !== 'Succeeded' && status !== 'Failed') {
 					if (elapsedMs >= maxPollTimeMs) {
@@ -1806,12 +1812,16 @@ export default {
 					}
 					
 					const pollData = await pollResponse.json() as any;
+					lastPollData = pollData;
 					status = pollData.status;
 					logger.info(`[transcode-video-operation] (${filename}) Polling Speech2Text job status... Status: ${status}`);
 				}
 				
 				if (status === 'Failed') {
-					throw new Error("Speech2Text job failed on Azure Speech Services");
+					const azureError = lastPollData?.properties?.error;
+					const azureErrorCode = azureError?.code || 'Unknown';
+					const azureErrorMessage = azureError?.message || 'No detailed error message';
+					throw new Error(`Speech2Text job failed on Azure Speech Services. Code: ${azureErrorCode}, Message: ${azureErrorMessage}`);
 				}
 				
 				// Get files from files endpoint
