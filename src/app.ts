@@ -808,6 +808,54 @@ export default {
 			schema: {
 				required: false
 			}
+		},
+		{
+			field: 'speech2text_timeout',
+			name: 'Speech2Text Timeout (Seconds)',
+			type: 'integer',
+			meta: {
+				width: 'half',
+				interface: 'input',
+				options: {
+					placeholder: '1800',
+					min: 60,
+					step: 60
+				},
+				note: 'Maximum time to wait for the Speech2Text transcription to complete, in seconds. Default: 1800 (30 minutes).',
+				conditions: [
+					{
+						name: 'Hide speech2text settings',
+						rule: {
+							_or: [
+								{
+									process_mode: {
+										_in: ['hls_only', 'audio_only']
+									}
+								},
+								{
+									_and: [
+										{
+											process_mode: {
+												_eq: 'all'
+											}
+										},
+										{
+											generate_speech2text: {
+												_eq: false
+											}
+										}
+									]
+								}
+							]
+						},
+						hidden: true
+					}
+				]
+			},
+			schema: {
+				default_value: 1800,
+				required: false
+			}
 		}
 	],
 };

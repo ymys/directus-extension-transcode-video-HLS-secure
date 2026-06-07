@@ -65,6 +65,7 @@ interface OperationInput {
 	speech2text_diarization?: boolean;
 	speech2text_access_token?: string;
 	speech2text_speaker_map?: any;
+	speech2text_timeout?: number | string;
 }
 
 interface QualityOption {
@@ -138,7 +139,8 @@ export default {
 			speech2text_locale = 'id-ID',
 			speech2text_diarization = true,
 			speech2text_access_token,
-			speech2text_speaker_map
+			speech2text_speaker_map,
+			speech2text_timeout
 		}: OperationInput, 
 		{ env, services, getSchema, logger }: OperationContext
 	): Promise<OperationResult | { error: string }> => {
@@ -1904,7 +1906,17 @@ export default {
 				// Poll status until Succeeded or Failed
 				let status = jobData.status || 'NotStarted';
 				const pollIntervalMs = 5000;
-				const maxPollTimeMs = 600000; // 10 minutes timeout
+				
+				let timeoutSeconds = 1800; // default 30 minutes (1800 seconds)
+				if (speech2text_timeout !== undefined && speech2text_timeout !== null) {
+					const parsed = parseInt(String(speech2text_timeout), 10);
+					if (!isNaN(parsed) && parsed > 0) {
+						timeoutSeconds = parsed;
+					}
+				}
+				const maxPollTimeMs = timeoutSeconds * 1000;
+				logger.info(`[transcode-video-operation] (${filename}) Polling transcription job with a timeout of ${timeoutSeconds} seconds (${Math.round(timeoutSeconds / 60)} minutes)`);
+				
 				let elapsedMs = 0;
 				let lastPollData = jobData;
 				
