@@ -45,6 +45,7 @@ interface File {
 interface OperationInput {
 	file: File | string;
 	folder_id?: string;
+	process_mode?: 'all' | 'hls_only' | 'audio_only' | 'transcription_only';
 	keyBaseUrl?: string;
 	playlist_reference_type?: 'id' | 'filename_disk';
 	qualities?: string[] | string;
@@ -63,6 +64,7 @@ interface OperationInput {
 	speech2text_locale?: string;
 	speech2text_diarization?: boolean;
 	speech2text_access_token?: string;
+	speech2text_speaker_map?: any;
 }
 
 interface QualityOption {
@@ -104,6 +106,7 @@ interface OperationResult {
 		subtitle: string | null;
 		audio?: string | null;
 		s2t_subtitle?: string | null;
+		s2t_json?: string | null;
 		s2t_error?: string | null;
 	};
 	files: UploadedFile[];
@@ -116,6 +119,7 @@ export default {
 		{ 
 			file, 
 			folder_id, 
+			process_mode = 'all',
 			keyBaseUrl,
 			playlist_reference_type = 'id', 
 			qualities = ['240p', '480p', '720p', '1080p', '2160p'], 
@@ -133,7 +137,8 @@ export default {
 			speech2text_endpoint,
 			speech2text_locale = 'id-ID',
 			speech2text_diarization = true,
-			speech2text_access_token
+			speech2text_access_token,
+			speech2text_speaker_map
 		}: OperationInput, 
 		{ env, services, getSchema, logger }: OperationContext
 	): Promise<OperationResult | { error: string }> => {
@@ -309,15 +314,27 @@ export default {
 			return data;
 		}
 
-		// Get video metadata (dimensions, duration)
+		// Get video/audio metadata (dimensions, duration)
 		const getVideoMetadata = async (inputFile: string): Promise<VideoMetadata> => {
 			return new Promise((resolve, reject) => {
-				// Get width, height, duration, and rotation
 				exec(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height:format=duration -of json ${inputFile}`, 
 					(error, stdout) => {
 						if (error) {
-							logger.error(`[transcode-video-operation] (${filename}) Error getting video metadata:`, error);
-							reject(error);
+							// Try to query just format duration as fallback (for audio inputs)
+							exec(`ffprobe -v error -show_entries format=duration -of json ${inputFile}`, (err2, stdout2) => {
+								if (err2) {
+									logger.error(`[transcode-video-operation] (${filename}) Error getting metadata:`, err2);
+									reject(err2);
+									return;
+								}
+								try {
+									const data2 = JSON.parse(stdout2);
+									const duration = data2.format?.duration ? Math.floor(parseFloat(data2.format.duration) * 1000) : 0;
+									resolve({ width: 0, height: 0, isVertical: false, duration });
+								} catch (parseError) {
+									reject(parseError);
+								}
+							});
 							return;
 						}
 						
@@ -327,7 +344,9 @@ export default {
 							const format = data.format;
 							
 							if (!stream || !stream.width || !stream.height) {
-								reject(new Error('Could not get video dimensions'));
+								// Fallback for audio files
+								const duration = format?.duration ? Math.floor(parseFloat(format.duration) * 1000) : 0;
+								resolve({ width: 0, height: 0, isVertical: false, duration });
 								return;
 							}
 							
@@ -794,17 +813,14 @@ export default {
 			})
 		}
 
-		const extractAudio = async (inputFile: string, outputPath: string, niceValue?: number): Promise<string> => {
+				const extractAudio = async (inputFile: string, outputPath: string, forceMono: boolean, niceValue?: number): Promise<string> => {
 			return new Promise((resolve, reject) => {
-				logger.info(`[transcode-video-operation] (${filename}) Extracting audio track to: ${outputPath}`);
+				logger.info(`[transcode-video-operation] (${filename}) Extracting audio track to: ${outputPath} (Force mono: ${forceMono})`);
 				
 				const isWindows = process.platform === 'win32';
 				const nicePrefix = (!isWindows && niceValue !== undefined && niceValue !== null) ? `nice -n ${niceValue} ` : '';
 				
-				// Azure Speech-to-Text requires mono audio when diarization is enabled.
-				// Forcing mono (1 channel) and 16kHz sample rate standardizes audio for transcription.
-				const isMonoRequired = generate_speech2text && speech2text_diarization;
-				const audioParams = isMonoRequired ? '-ac 1 -ar 16000' : '';
+				const audioParams = forceMono ? '-ac 1 -ar 16000' : '';
 				const command = `${nicePrefix}ffmpeg -y -i ${inputFile} -vn -acodec libmp3lame ${audioParams} -q:a 4 ${outputPath}`;
 				
 				exec(command, (error, stdout, stderr) => {
@@ -884,10 +900,23 @@ export default {
 			return vttResult;
 		};
 
-		const convertAzureJsonToSrt = (jsonData: any): string => {
+				const convertAzureJsonToSrt = (jsonData: any, speakerMap: any): string => {
 			let srt = "";
 			let index = 1;
 			const phrases = jsonData.recognizedPhrases || [];
+
+			let parsedMap: Record<string, string> = {};
+			if (speakerMap) {
+				if (typeof speakerMap === 'string') {
+					try {
+						parsedMap = JSON.parse(speakerMap);
+					} catch (e) {
+						logger.warn(`[transcode-video-operation] Failed to parse speaker map: ${e instanceof Error ? e.message : String(e)}`);
+					}
+				} else if (typeof speakerMap === 'object') {
+					parsedMap = speakerMap;
+				}
+			}
 
 			const parseOffset = (offsetStr: string | undefined, offsetInTicks: number | undefined): number => {
 				if (offsetInTicks !== undefined && offsetInTicks !== null) {
@@ -911,6 +940,33 @@ export default {
 				return `${pad(hours, 2)}:${pad(minutes, 2)}:${pad(seconds, 2)},${pad(milliseconds, 3)}`;
 			};
 
+			const wrapText = (text: string, maxLen = 60): string => {
+				if (!text) return '';
+				const words = text.split(' ');
+				const lines: string[] = [];
+				let currentLine = '';
+				
+				for (const word of words) {
+					if (!word) continue;
+					if (currentLine.length + word.length + 1 <= maxLen) {
+						if (currentLine.length > 0) {
+							currentLine += ' ' + word;
+						} else {
+							currentLine = word;
+						}
+					} else {
+						if (currentLine.length > 0) {
+							lines.push(currentLine);
+						}
+						currentLine = word;
+					}
+				}
+				if (currentLine.length > 0) {
+					lines.push(currentLine);
+				}
+				return lines.join('\n');
+			};
+
 			for (const phrase of phrases) {
 				const startMs = parseOffset(phrase.offset, phrase.offsetInTicks);
 				const durationMs = parseOffset(phrase.duration, phrase.durationInTicks);
@@ -922,11 +978,17 @@ export default {
 				const display = phrase.nBest?.[0]?.display || "";
 				const speaker = phrase.speaker;
 
-				const speakerPrefix = speaker !== undefined ? `Speaker ${speaker}: ` : "";
-				const text = `${speakerPrefix}${display}`.trim();
+				let speakerPrefix = "";
+				if (speaker !== undefined) {
+					const speakerName = (parsedMap && parsedMap[String(speaker)]) || `Speaker ${speaker}`;
+					speakerPrefix = `[${speakerName}] `;
+				}
 
-				if (text) {
-					srt += `${index}\n${startTimeStr} --> ${endTimeStr}\n${text}\n\n`;
+				const combinedText = `${speakerPrefix}${display}`.trim();
+				const wrappedText = wrapText(combinedText, 60);
+
+				if (wrappedText) {
+					srt += `${index}\n${startTimeStr} --> ${endTimeStr}\n${wrappedText}\n\n`;
 					index++;
 				}
 			}
@@ -1142,234 +1204,19 @@ export default {
 			throw error;
 		}
 
-		// --- HLS AES-128 Encryption Support ---
-		let keyInfoPath: string | undefined = undefined;
-		const keyFilename = `${filename}.key`;
-		const keyFileLocalPath = path.join(outputDir, keyFilename);
-		
-		let encryptionKey: Buffer;
-		if (fs.existsSync(keyFileLocalPath)) {
-			// Load the existing key to avoid breaking existing encrypted segments!
-			encryptionKey = fs.readFileSync(keyFileLocalPath);
-			logger.info(`[transcode-video-operation] (${filename}) Existing HLS encryption key loaded from disk: ${keyFileLocalPath}`);
-		} else {
-			// Generate a new encryption key
-			encryptionKey = crypto.randomBytes(16);
-			// Save the raw key directly to the output directory
-			fs.writeFileSync(keyFileLocalPath, encryptionKey);
-			logger.info(`[transcode-video-operation] (${filename}) HLS encryption key generated: ${keyFileLocalPath}`);
-		}
+		const isAudioInput = fileObject.type?.startsWith('audio/') || extension?.toLowerCase() === 'mp3';
 
-		// Determine keyURI for the manifest
-		const keyURI = keyBaseUrl ? `${keyBaseUrl.endsWith('/') ? keyBaseUrl.slice(0, -1) : keyBaseUrl}/${keyFilename}` : keyFilename;
-		
-		// Create temporary .keyinfo file
-		keyInfoPath = path.join(os.tmpdir(), `${filename}_${crypto.randomBytes(4).toString('hex')}.keyinfo`);
-		const keyInfoContent = `${keyURI}\n${keyFileLocalPath}`;
-		fs.writeFileSync(keyInfoPath, keyInfoContent);
-		logger.info(`[transcode-video-operation] (${filename}) HLS keyinfo file created: ${keyInfoPath}`);
-		// --------------------------------------
-
-		// Check if input is 10-bit by examining the video stream
-		const isHighBitDepth = await new Promise<boolean>((resolve, reject) => {
-				exec(`ffprobe -v error -select_streams v:0 -show_entries stream=pix_fmt -of json ${filePath}`, 
-					(error, stdout) => {
-						if (error) {
-							logger.warn(`[transcode-video-operation] (${filename}) Error checking bit depth, assuming 8-bit: %s`, error.message);
-							resolve(false); // Default to false if check fails
-							return;
-						}
-						try {
-							const data = JSON.parse(stdout);
-							const pixFmt = data.streams?.[0]?.pix_fmt;
-							// Check if pixel format indicates 10-bit (e.g., yuv420p10le)
-							resolve(pixFmt?.includes('10') || false);
-						} catch (parseError) {
-							logger.warn(`[transcode-video-operation] (${filename}) Error parsing bit depth check, assuming 8-bit`);
-							resolve(false);
-						}
-					});
-		});
-
-		if (isHighBitDepth) {
-			logger.info(`[transcode-video-operation] (${filename}) High bit depth detected, will convert to yuv420p`);
-		}
-
-		// Get video metadata early to determine source resolution and prevent upscaling
-		logger.info(`[transcode-video-operation] (${filename}) Getting source video metadata...`);
+		// Get video/audio metadata early to determine source resolution/duration and prevent upscaling
+		logger.info(`[transcode-video-operation] (${filename}) Getting source metadata...`);
 		const sourceMetadata = await getVideoMetadata(filePath).catch(error => {
 			logger.error(`[transcode-video-operation] (${filename}) Error getting source metadata:`, error);
 			// If we can't get metadata, allow all qualities (fallback behavior)
 			return { width: 99999, height: 99999, isVertical: false, duration: 0 };
 		});
 		
-		const sourceHeight = sourceMetadata.height;
-		logger.info(`[transcode-video-operation] (${filename}) Source video resolution: ${sourceMetadata.width}x${sourceHeight}`);
-
-		// Get optimized quality options with encryption
-		const allQualitiesRaw = getQualityOptionsRaw(isHighBitDepth, keyInfoPath);
-		
-		// Filter qualities based on user selection (default: all)
-		// Handle cases where qualities might be undefined, null, or not an array
-		// Tags interface returns strings with "p" suffix (e.g., "240p"), so default is also strings with "p"
-		let selectedQualities: string[] = ['240p', '480p', '720p', '1080p', '2160p']; // Default: all qualities
-		if (qualities) {
-			if (Array.isArray(qualities)) {
-				selectedQualities = qualities;
-			} else if (typeof qualities === 'string') {
-				// Try to parse as JSON if it's a string
-				try {
-					selectedQualities = JSON.parse(qualities);
-				} catch (e) {
-					logger.warn(`[transcode-video-operation] (${filename}) Could not parse qualities, using all:`, e);
-				}
-			}
-		}
-		
-		// Convert to numbers (tags interface returns strings)
-		// Strip "p" suffix if present (e.g., "240p" -> 240)
-		const selectedQualitiesNumbers = selectedQualities
-			.map(q => {
-				if (typeof q === 'string') {
-					// Remove "p" suffix if present
-					const cleaned = q.replace(/p$/i, '');
-					return parseInt(cleaned, 10);
-				}
-				return q;
-			})
-			.filter(q => !isNaN(q));
-		
-		// Map quality IDs to their target heights
-		const qualityHeights: Record<number, number> = {
-			240: 240,
-			480: 480,
-			720: 720,
-			1080: 1080,
-			2160: 2160
-		};
-		
-		// Filter qualities: first by user selection, then by source resolution (prevent upscaling)
-		let qualitiesRaw = allQualitiesRaw.filter(quality => selectedQualitiesNumbers.includes(quality.id));
-		
-		// Filter out qualities that would require upscaling
-		const qualitiesBeforeFilter = qualitiesRaw.length;
-		qualitiesRaw = qualitiesRaw.filter(quality => {
-			const targetHeight = qualityHeights[quality.id];
-			if (targetHeight && targetHeight > sourceHeight) {
-				logger.info(`[transcode-video-operation] (${filename}) Skipping ${quality.id}p (target: ${targetHeight}px, source: ${sourceHeight}px) to prevent upscaling`);
-				return false;
-			}
-			return true;
-		});
-		
-		if (qualitiesBeforeFilter > qualitiesRaw.length) {
-			logger.info(`[transcode-video-operation] (${filename}) Filtered out ${qualitiesBeforeFilter - qualitiesRaw.length} quality level(s) that would require upscaling`);
-		}
-		
-		logger.info(`[transcode-video-operation] (${filename}) Selected qualities: ${selectedQualitiesNumbers.join(', ')}`);
-		logger.info(`[transcode-video-operation] (${filename}) Will transcode ${qualitiesRaw.length} quality levels`);
-		
-		if (qualitiesRaw.length === 0) {
-			return {
-				error: 'No quality levels selected for transcoding'
-			};
-		}
-		
-		// Check if transcoded files already exist
-		const existingFiles = readFiles(outputDir);
-		const hasFiles = existingFiles.some(file => file.includes('_240p') || file.includes('_480p') || file.includes('_720p') || file.includes('_1080p') || file.includes('_2160p'));
-		
-		if (!hasFiles) {
-			logger.info(`[transcode-video-operation] (${filename}) No existing files found, starting transcoding...`);
-			
-			try {
-				// Process qualities sequentially to catch errors on the first quality level
-				for (const quality of qualitiesRaw) {
-					try {
-						logger.info(`[transcode-video-operation] (${filename}) Starting transcoding for quality: %sp`, quality.id);
-						await ffmpegRawSync(filePath, quality, validatedThreads, validatedNice);
-						logger.info(`[transcode-video-operation] (${filename}) Successfully transcoded quality: %sp`, quality.id);
-					} catch (error) {
-						logger.error(`[transcode-video-operation] (${filename}) Failed to transcode quality %sp:`, quality.id, error);
-						throw error; // Re-throw to abort the operation
-					}
-				}
-				logger.info(`[transcode-video-operation] (${filename}) All qualities transcoded successfully`);
-			} finally {
-				// Clean up temporary .keyinfo file
-				if (keyInfoPath && fs.existsSync(keyInfoPath)) {
-					try {
-						fs.unlinkSync(keyInfoPath);
-						logger.info(`[transcode-video-operation] (${filename}) HLS keyinfo file cleaned up: ${keyInfoPath}`);
-					} catch (cleanupError) {
-						logger.warn(`[transcode-video-operation] (${filename}) Error cleaning up HLS keyinfo file:`, cleanupError);
-					}
-				}
-			}
-		} else {
-			logger.info(`[transcode-video-operation] (${filename}) Transcoded files already exist, skipping transcoding`);
-			
-			// Even if skipping transcoding, we should clean up the keyinfo file we just created
-			if (keyInfoPath && fs.existsSync(keyInfoPath)) {
-				try {
-					fs.unlinkSync(keyInfoPath);
-					logger.info(`[transcode-video-operation] (${filename}) HLS keyinfo file cleaned up (skipped transcoding): ${keyInfoPath}`);
-				} catch (cleanupError) {
-					logger.warn(`[transcode-video-operation] (${filename}) Error cleaning up HLS keyinfo file:`, cleanupError);
-				}
-			}
-		}
-
-		// Generate master playlist dynamically based on available quality files
-		const m3u8Content: string[] = ['#EXTM3U', '#EXT-X-VERSION:3'];
-		
-		// Add available quality streams (only if the file exists and has content)
-		for (const quality of qualitiesRaw) {
-			const qualityFile = `${outputDir}/${filename}_${quality.id}p.m3u8`;
-			if (fs.existsSync(qualityFile) && fs.statSync(qualityFile).size > 0) {
-				switch (quality.id) {
-					case 240:
-						m3u8Content.push('#EXT-X-STREAM-INF:BANDWIDTH=400000,RESOLUTION=426x240', `${filename}_240p.m3u8`);
-						break;
-					case 480:
-						m3u8Content.push('#EXT-X-STREAM-INF:BANDWIDTH=1400000,RESOLUTION=854x480', `${filename}_480p.m3u8`);
-						break;
-					case 720:
-						m3u8Content.push('#EXT-X-STREAM-INF:BANDWIDTH=2800000,RESOLUTION=1280x720', `${filename}_720p.m3u8`);
-						break;
-					case 1080:
-						m3u8Content.push('#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080', `${filename}_1080p.m3u8`);
-						break;
-					case 2160:
-						m3u8Content.push('#EXT-X-STREAM-INF:BANDWIDTH=20000000,RESOLUTION=3840x2160', `${filename}_2160p.m3u8`);
-						break;
-				}
-			}
-		}
-
-		// Only write master playlist if we have at least one quality stream
-		if (m3u8Content.length <= 2) {
-			logger.error(`[transcode-video-operation] (${filename}) No valid quality playlists found, cannot create master playlist`);
-			return {
-				error: 'No valid quality playlists found, cannot create master playlist'
-			};
-		}
-
-		const masterPlaylistPath = `${outputDir}/${filename}_master.m3u8`;
-		fs.writeFileSync(masterPlaylistPath, m3u8Content.join('\n'));
-		
-		// Verify master playlist was created successfully
-		if (!fs.existsSync(masterPlaylistPath) || fs.statSync(masterPlaylistPath).size === 0) {
-			logger.error(`[transcode-video-operation] (${filename}) Failed to create master playlist: ${masterPlaylistPath}`);
-			return {
-				error: `Failed to create master playlist: ${masterPlaylistPath}`
-			};
-		}
-		
-		logger.info(`[transcode-video-operation] (${filename}) Master playlist created: ${filename}_master.m3u8`);
-
-		// Use metadata we already retrieved earlier (sourceMetadata)
 		const metadata = sourceMetadata;
+		const sourceHeight = sourceMetadata.height;
+		logger.info(`[transcode-video-operation] (${filename}) Source metadata: width=${sourceMetadata.width}, height=${sourceHeight}, duration=${sourceMetadata.duration}`);
 
 		// Create virtual folder for this file's transcoded assets
 		// Use folder_id as parent and filename as the folder name
@@ -1377,289 +1224,514 @@ export default {
 		const targetFolderId = await ensureFolder(filename, folder_id);
 		logger.info(`[transcode-video-operation] (${filename}) Created/using folder: ${targetFolderId}`);
 
-		// Check if thumbnail already exists in Directus before extracting
-		const thumbnailFileName = `${filename}_thumb.jpg`;
+		// --- HLS AES-128 Encryption Support ---
+		let keyInfoPath: string | undefined = undefined;
+		const keyFilename = `${filename}.key`;
+		const keyFileLocalPath = path.join(outputDir, keyFilename);
+		
+		let masterId: string | null = null;
 		let thumbnailId: string | null = null;
-		const { FilesService } = services;
-		const filesService = new FilesService({
-			schema: await getSchema(),
-		});
-
-		const thumbnailFilter: any = {
-			filename_disk: { _eq: thumbnailFileName },
-			storage: { _eq: targetStorageAdapter },
-			folder: { _eq: targetFolderId }
-		};
-
-		const existingThumbnails = await filesService.readByQuery({
-			filter: thumbnailFilter,
-			limit: 1
-		});
-
-		if (existingThumbnails && Array.isArray(existingThumbnails) && existingThumbnails.length > 0) {
-			const existingThumbnail = existingThumbnails[0];
-			thumbnailId = existingThumbnail?.id || existingThumbnail?.data?.id || (typeof existingThumbnail === 'string' ? existingThumbnail : null);
-			if (thumbnailId) {
-				logger.info(`[transcode-video-operation] (${filename}) Thumbnail already exists in Directus: ${thumbnailId}, reusing`);
-			}
-		}
-
-		// Extract thumbnail only if it doesn't exist in Directus
-		const thumbnailPath = `${outputDir}/${thumbnailFileName}`;
-		if (!thumbnailId) {
-			try {
-				await extractThumbnail(filePath, thumbnailPath);
-				// Verify thumbnail was created and has content
-				if (!fs.existsSync(thumbnailPath) || fs.statSync(thumbnailPath).size === 0) {
-					throw new Error(`Thumbnail extraction failed: file does not exist or is empty`);
-				}
-				logger.info(`[transcode-video-operation] (${filename}) Thumbnail extracted`);
-			} catch (error) {
-				logger.error(`[transcode-video-operation] (${filename}) Error extracting thumbnail:`, error);
-				// Don't proceed with thumbnail upload if extraction failed
-				thumbnailId = null;
-			}
-		} else {
-			// Thumbnail exists in Directus, skip extraction
-			logger.info(`[transcode-video-operation] (${filename}) Skipping thumbnail extraction (already exists)`);
-		}
-
-		// Track files we created and create filename -> file ID map
 		const fileIdMap: Record<string, string> = {};
 		const uploadedFiles: UploadedFile[] = [];
+		let qualitiesRaw: any[] = [];
 
-		// Upload thumbnail first if it exists (or use existing one)
-		if (thumbnailId) {
-			// Thumbnail already exists in Directus, just add to fileIdMap
-			fileIdMap[path.basename(thumbnailPath)] = thumbnailId;
-			uploadedFiles.push({ filename_disk: path.basename(thumbnailPath), id: thumbnailId });
-		} else if (fs.existsSync(thumbnailPath)) {
-			// Thumbnail was just extracted, verify it has content before uploading
-			const thumbnailSize = fs.statSync(thumbnailPath).size;
-			if (thumbnailSize === 0) {
-				const thumbnailAction = targetStorageDriver === 'local' ? 'register' : 'upload';
-				logger.error(`[transcode-video-operation] (${filename}) Thumbnail file is empty, cannot ${thumbnailAction}`);
+		if (process_mode === 'all' || process_mode === 'hls_only') {
+			let encryptionKey: Buffer;
+			if (fs.existsSync(keyFileLocalPath)) {
+				// Load the existing key to avoid breaking existing encrypted segments!
+				encryptionKey = fs.readFileSync(keyFileLocalPath);
+				logger.info(`[transcode-video-operation] (${filename}) Existing HLS encryption key loaded from disk: ${keyFileLocalPath}`);
 			} else {
-				try {
-					// Get thumbnail dimensions
-					let thumbnailWidth: number | null = null;
-					let thumbnailHeight: number | null = null;
-					try {
-						const imageMetadata = await getImageMetadata(thumbnailPath);
-						thumbnailWidth = imageMetadata.width;
-						thumbnailHeight = imageMetadata.height;
-						logger.info(`[transcode-video-operation] (${filename}) Thumbnail dimensions: ${thumbnailWidth}x${thumbnailHeight}`);
-					} catch (error) {
-						logger.warn(`[transcode-video-operation] (${filename}) Could not get thumbnail dimensions:`, error);
-					}
+				// Generate a new encryption key
+				encryptionKey = crypto.randomBytes(16);
+				// Save the raw key directly to the output directory
+				fs.writeFileSync(keyFileLocalPath, encryptionKey);
+				logger.info(`[transcode-video-operation] (${filename}) HLS encryption key generated: ${keyFileLocalPath}`);
+			}
 
-					// Upload thumbnail with metadata
-					thumbnailId = await uploadFileToDirectus(thumbnailPath, targetFolderId, {
-						mimetype: 'image/jpeg',
-						width: thumbnailWidth,
-						height: thumbnailHeight
-					});
-					fileIdMap[path.basename(thumbnailPath)] = thumbnailId;
-					uploadedFiles.push({ filename_disk: path.basename(thumbnailPath), id: thumbnailId });
-					const thumbnailAction = targetStorageDriver === 'local' ? 'registered' : 'uploaded';
-					logger.info(`[transcode-video-operation] (${filename}) Thumbnail ${thumbnailAction}: ${thumbnailId}`);
-				} catch (error) {
-					const thumbnailAction = targetStorageDriver === 'local' ? 'registering' : 'uploading';
-					logger.error(`[transcode-video-operation] (${filename}) Error ${thumbnailAction} thumbnail:`, error);
+			// Determine keyURI for the manifest
+			const keyURI = keyBaseUrl ? `${keyBaseUrl.endsWith('/') ? keyBaseUrl.slice(0, -1) : keyBaseUrl}/${keyFilename}` : keyFilename;
+			
+			// Create temporary .keyinfo file
+			keyInfoPath = path.join(os.tmpdir(), `${filename}_${crypto.randomBytes(4).toString('hex')}.keyinfo`);
+			const keyInfoContent = `${keyURI}\n${keyFileLocalPath}`;
+			fs.writeFileSync(keyInfoPath, keyInfoContent);
+			logger.info(`[transcode-video-operation] (${filename}) HLS keyinfo file created: ${keyInfoPath}`);
+			// --------------------------------------
+
+			// Check if input is 10-bit by examining the video stream
+			const isHighBitDepth = await new Promise<boolean>((resolve, reject) => {
+					exec(`ffprobe -v error -select_streams v:0 -show_entries stream=pix_fmt -of json ${filePath}`, 
+						(error, stdout) => {
+							if (error) {
+								logger.warn(`[transcode-video-operation] (${filename}) Error checking bit depth, assuming 8-bit: %s`, error.message);
+								resolve(false); // Default to false if check fails
+								return;
+							}
+							try {
+								const data = JSON.parse(stdout);
+								const pixFmt = data.streams?.[0]?.pix_fmt;
+								// Check if pixel format indicates 10-bit (e.g., yuv420p10le)
+								resolve(pixFmt?.includes('10') || false);
+							} catch (parseError) {
+								logger.warn(`[transcode-video-operation] (${filename}) Error parsing bit depth check, assuming 8-bit`);
+								resolve(false);
+							}
+						});
+			});
+
+			if (isHighBitDepth) {
+				logger.info(`[transcode-video-operation] (${filename}) High bit depth detected, will convert to yuv420p`);
+			}
+
+			// Get optimized quality options with encryption
+			const allQualitiesRaw = getQualityOptionsRaw(isHighBitDepth, keyInfoPath);
+			
+			// Filter qualities based on user selection (default: all)
+			// Handle cases where qualities might be undefined, null, or not an array
+			// Tags interface returns strings with "p" suffix (e.g., "240p"), so default is also strings with "p"
+			let selectedQualities: string[] = ['240p', '480p', '720p', '1080p', '2160p']; // Default: all qualities
+			if (qualities) {
+				if (Array.isArray(qualities)) {
+					selectedQualities = qualities;
+				} else if (typeof qualities === 'string') {
+					// Try to parse as JSON if it's a string
+					try {
+						selectedQualities = JSON.parse(qualities);
+					} catch (e) {
+						logger.warn(`[transcode-video-operation] (${filename}) Could not parse qualities, using all:`, e);
+					}
 				}
 			}
-		}
-
-		// --- Upload HLS Encryption Key ---
-		if (fs.existsSync(keyFileLocalPath)) {
-			try {
-				logger.info(`[transcode-video-operation] (${filename}) Uploading HLS encryption key: ${keyFilename}`);
-				const keyId = await uploadFileToDirectus(keyFileLocalPath, targetFolderId, {
-					mimetype: 'application/octet-stream'
-				});
-				fileIdMap[keyFilename] = keyId;
-				uploadedFiles.push({ filename_disk: keyFilename, id: keyId });
-			} catch (error) {
-				logger.error(`[transcode-video-operation] (${filename}) Error uploading HLS key ${keyFilename}:`, error);
+			
+			// Convert to numbers (tags interface returns strings)
+			// Strip "p" suffix if present (e.g., "240p" -> 240)
+			const selectedQualitiesNumbers = selectedQualities
+				.map(q => {
+					if (typeof q === 'string') {
+						// Remove "p" suffix if present
+						const cleaned = q.replace(/p$/i, '');
+						return parseInt(cleaned, 10);
+					}
+					return q;
+				})
+				.filter(q => !isNaN(q));
+			
+			// Map quality IDs to their target heights
+			const qualityHeights: Record<number, number> = {
+				240: 240,
+				480: 480,
+				720: 720,
+				1080: 1080,
+				2160: 2160
+			};
+			
+			// Filter qualities: first by user selection, then by source resolution (prevent upscaling)
+			qualitiesRaw = allQualitiesRaw.filter(quality => selectedQualitiesNumbers.includes(quality.id));
+			
+			// Filter out qualities that would require upscaling
+			const qualitiesBeforeFilter = qualitiesRaw.length;
+			qualitiesRaw = qualitiesRaw.filter(quality => {
+				const targetHeight = qualityHeights[quality.id];
+				if (targetHeight && targetHeight > sourceHeight) {
+					logger.info(`[transcode-video-operation] (${filename}) Skipping ${quality.id}p (target: ${targetHeight}px, source: ${sourceHeight}px) to prevent upscaling`);
+					return false;
+				}
+				return true;
+			});
+			
+			if (qualitiesBeforeFilter > qualitiesRaw.length) {
+				logger.info(`[transcode-video-operation] (${filename}) Filtered out ${qualitiesBeforeFilter - qualitiesRaw.length} quality level(s) that would require upscaling`);
 			}
-		}
-		// ----------------------------------
+			
+			logger.info(`[transcode-video-operation] (${filename}) Selected qualities: ${selectedQualitiesNumbers.join(', ')}`);
+			logger.info(`[transcode-video-operation] (${filename}) Will transcode ${qualitiesRaw.length} quality levels`);
+			
+			if (qualitiesRaw.length === 0) {
+				return {
+					error: 'No quality levels selected for transcoding'
+				};
+			}
+			
+			// Check if transcoded files already exist
+			const existingFiles = readFiles(outputDir);
+			const hasFiles = existingFiles.some(file => file.includes('_240p') || file.includes('_480p') || file.includes('_720p') || file.includes('_1080p') || file.includes('_2160p'));
+			
+			if (!hasFiles) {
+				logger.info(`[transcode-video-operation] (${filename}) No existing files found, starting transcoding...`);
+				
+				try {
+					// Process qualities sequentially to catch errors on the first quality level
+					for (const quality of qualitiesRaw) {
+						try {
+							logger.info(`[transcode-video-operation] (${filename}) Starting transcoding for quality: %sp`, quality.id);
+							await ffmpegRawSync(filePath, quality, validatedThreads, validatedNice);
+							logger.info(`[transcode-video-operation] (${filename}) Successfully transcoded quality: %sp`, quality.id);
+						} catch (error) {
+							logger.error(`[transcode-video-operation] (${filename}) Failed to transcode quality %sp:`, quality.id, error);
+							throw error; // Re-throw to abort the operation
+						}
+					}
+					logger.info(`[transcode-video-operation] (${filename}) All qualities transcoded successfully`);
+				} finally {
+					// Clean up temporary .keyinfo file
+					if (keyInfoPath && fs.existsSync(keyInfoPath)) {
+						try {
+							fs.unlinkSync(keyInfoPath);
+							logger.info(`[transcode-video-operation] (${filename}) HLS keyinfo file cleaned up: ${keyInfoPath}`);
+						} catch (cleanupError) {
+							logger.warn(`[transcode-video-operation] (${filename}) Error cleaning up HLS keyinfo file:`, cleanupError);
+						}
+					}
+				}
+			} else {
+				logger.info(`[transcode-video-operation] (${filename}) Transcoded files already exist, skipping transcoding`);
+				
+				// Even if skipping transcoding, we should clean up the keyinfo file we just created
+				if (keyInfoPath && fs.existsSync(keyInfoPath)) {
+					try {
+						fs.unlinkSync(keyInfoPath);
+						logger.info(`[transcode-video-operation] (${filename}) HLS keyinfo file cleaned up (skipped transcoding): ${keyInfoPath}`);
+					} catch (cleanupError) {
+						logger.warn(`[transcode-video-operation] (${filename}) Error cleaning up HLS keyinfo file:`, cleanupError);
+					}
+				}
+			}
 
-		// Collect only segment files (not playlists) - we'll rebuild playlists with UUIDs after uploading segments
-		const segmentFiles = new Set<string>();
+			// Generate master playlist dynamically based on available quality files
+			const m3u8Content: string[] = ['#EXTM3U', '#EXT-X-VERSION:3'];
+			
+			// Add available quality streams (only if the file exists and has content)
+			for (const quality of qualitiesRaw) {
+				const qualityFile = `${outputDir}/${filename}_${quality.id}p.m3u8`;
+				if (fs.existsSync(qualityFile) && fs.statSync(qualityFile).size > 0) {
+					switch (quality.id) {
+						case 240:
+							m3u8Content.push('#EXT-X-STREAM-INF:BANDWIDTH=400000,RESOLUTION=426x240', `${filename}_240p.m3u8`);
+							break;
+						case 480:
+							m3u8Content.push('#EXT-X-STREAM-INF:BANDWIDTH=1400000,RESOLUTION=854x480', `${filename}_480p.m3u8`);
+							break;
+						case 720:
+							m3u8Content.push('#EXT-X-STREAM-INF:BANDWIDTH=2800000,RESOLUTION=1280x720', `${filename}_720p.m3u8`);
+							break;
+						case 1080:
+							m3u8Content.push('#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080', `${filename}_1080p.m3u8`);
+							break;
+						case 2160:
+							m3u8Content.push('#EXT-X-STREAM-INF:BANDWIDTH=15000000,RESOLUTION=3840x2160', `${filename}_2160p.m3u8`);
+							break;
+					}
+				}
+			}
 
-		// For each quality level, read the playlist to get the segment files
-		for (const quality of qualitiesRaw) {
-			const qualityPlaylistPath = `${outputDir}/${filename}_${quality.id}p.m3u8`;
-			if (fs.existsSync(qualityPlaylistPath)) {
-				// Read playlist to get segment file names
-				const playlistContent = fs.readFileSync(qualityPlaylistPath, 'utf-8');
-				const playlistLines = playlistContent.split('\n');
-				for (const line of playlistLines) {
-					const trimmedLine = line.trim();
-					// Skip comments and empty lines
-					if (trimmedLine && !trimmedLine.startsWith('#')) {
-						// This is a segment file name
-						// Remove any path prefix if present
-						const segmentFile = path.basename(trimmedLine);
-						if (segmentFile.endsWith('.ts') && segmentFile.startsWith(filename)) {
-							// Only add if the file actually exists on disk
-							const segmentFilePath = `${outputDir}/${segmentFile}`;
-							if (fs.existsSync(segmentFilePath)) {
-								segmentFiles.add(segmentFile);
+			// Only write master playlist if we have at least one quality stream
+			if (m3u8Content.length <= 2) {
+				logger.error(`[transcode-video-operation] (${filename}) No valid quality playlists found, cannot create master playlist`);
+				return {
+					error: 'No valid quality playlists found, cannot create master playlist'
+				};
+			}
+
+			const masterPlaylistPath = `${outputDir}/${filename}_master.m3u8`;
+			fs.writeFileSync(masterPlaylistPath, m3u8Content.join('\n'));
+			
+			// Verify master playlist was created successfully
+			if (!fs.existsSync(masterPlaylistPath) || fs.statSync(masterPlaylistPath).size === 0) {
+				logger.error(`[transcode-video-operation] (${filename}) Failed to create master playlist: ${masterPlaylistPath}`);
+				return {
+					error: `Failed to create master playlist: ${masterPlaylistPath}`
+				};
+			}
+			
+			logger.info(`[transcode-video-operation] (${filename}) Master playlist created: ${filename}_master.m3u8`);
+
+			// Check if thumbnail already exists in Directus before extracting
+			const thumbnailFileName = `${filename}_thumb.jpg`;
+			const { FilesService } = services;
+			const filesService = new FilesService({
+				schema: await getSchema(),
+			});
+
+			const thumbnailFilter: any = {
+				filename_disk: { _eq: thumbnailFileName },
+				storage: { _eq: targetStorageAdapter },
+				folder: { _eq: targetFolderId }
+			};
+
+			const existingThumbnails = await filesService.readByQuery({
+				filter: thumbnailFilter,
+				limit: 1
+			});
+
+			if (existingThumbnails && Array.isArray(existingThumbnails) && existingThumbnails.length > 0) {
+				const existingThumbnail = existingThumbnails[0];
+				thumbnailId = existingThumbnail?.id || existingThumbnail?.data?.id || (typeof existingThumbnail === 'string' ? existingThumbnail : null);
+				if (thumbnailId) {
+					logger.info(`[transcode-video-operation] (${filename}) Thumbnail already exists in Directus: ${thumbnailId}, reusing`);
+				}
+			}
+
+			// Extract thumbnail only if it doesn't exist in Directus
+			const thumbnailPath = `${outputDir}/${thumbnailFileName}`;
+			if (!thumbnailId) {
+				try {
+					await extractThumbnail(filePath, thumbnailPath);
+					// Verify thumbnail was created and has content
+					if (!fs.existsSync(thumbnailPath) || fs.statSync(thumbnailPath).size === 0) {
+						throw new Error(`Thumbnail extraction failed: file does not exist or is empty`);
+					}
+					logger.info(`[transcode-video-operation] (${filename}) Thumbnail extracted`);
+				} catch (error) {
+					logger.error(`[transcode-video-operation] (${filename}) Error extracting thumbnail:`, error);
+					// Don't proceed with thumbnail upload if extraction failed
+					thumbnailId = null;
+				}
+			} else {
+				// Thumbnail exists in Directus, skip extraction
+				logger.info(`[transcode-video-operation] (${filename}) Skipping thumbnail extraction (already exists)`);
+			}
+
+			// Upload thumbnail first if it exists (or use existing one)
+			if (thumbnailId) {
+				// Thumbnail already exists in Directus, just add to fileIdMap
+				fileIdMap[path.basename(thumbnailPath)] = thumbnailId;
+				uploadedFiles.push({ filename_disk: path.basename(thumbnailPath), id: thumbnailId });
+			} else if (fs.existsSync(thumbnailPath)) {
+				// Thumbnail was just extracted, verify it has content before uploading
+				const thumbnailSize = fs.statSync(thumbnailPath).size;
+				if (thumbnailSize === 0) {
+					const thumbnailAction = targetStorageDriver === 'local' ? 'register' : 'upload';
+					logger.error(`[transcode-video-operation] (${filename}) Thumbnail file is empty, cannot ${thumbnailAction}`);
+				} else {
+					try {
+						// Get thumbnail dimensions
+						let thumbnailWidth: number | null = null;
+						let thumbnailHeight: number | null = null;
+						try {
+							const imageMetadata = await getImageMetadata(thumbnailPath);
+							thumbnailWidth = imageMetadata.width;
+							thumbnailHeight = imageMetadata.height;
+							logger.info(`[transcode-video-operation] (${filename}) Thumbnail dimensions: ${thumbnailWidth}x${thumbnailHeight}`);
+						} catch (error) {
+							logger.warn(`[transcode-video-operation] (${filename}) Could not get thumbnail dimensions:`, error);
+						}
+
+						// Upload thumbnail with metadata
+						thumbnailId = await uploadFileToDirectus(thumbnailPath, targetFolderId, {
+							mimetype: 'image/jpeg',
+							width: thumbnailWidth,
+							height: thumbnailHeight
+						});
+						fileIdMap[path.basename(thumbnailPath)] = thumbnailId;
+						uploadedFiles.push({ filename_disk: path.basename(thumbnailPath), id: thumbnailId });
+						const thumbnailAction = targetStorageDriver === 'local' ? 'registered' : 'uploaded';
+						logger.info(`[transcode-video-operation] (${filename}) Thumbnail ${thumbnailAction}: ${thumbnailId}`);
+					} catch (error) {
+						const thumbnailAction = targetStorageDriver === 'local' ? 'registering' : 'uploading';
+						logger.error(`[transcode-video-operation] (${filename}) Error ${thumbnailAction} thumbnail:`, error);
+					}
+				}
+			}
+
+			// --- Upload HLS Encryption Key ---
+			if (fs.existsSync(keyFileLocalPath)) {
+				try {
+					logger.info(`[transcode-video-operation] (${filename}) Uploading HLS encryption key: ${keyFilename}`);
+					const keyId = await uploadFileToDirectus(keyFileLocalPath, targetFolderId, {
+						mimetype: 'application/octet-stream'
+					});
+					fileIdMap[keyFilename] = keyId;
+					uploadedFiles.push({ filename_disk: keyFilename, id: keyId });
+				} catch (error) {
+					logger.error(`[transcode-video-operation] (${filename}) Error uploading HLS key ${keyFilename}:`, error);
+				}
+			}
+			// ----------------------------------
+
+			// Collect only segment files (not playlists) - we'll rebuild playlists with UUIDs after uploading segments
+			const segmentFiles = new Set<string>();
+
+			// For each quality level, read the playlist to get the segment files
+			for (const quality of qualitiesRaw) {
+				const qualityPlaylistPath = `${outputDir}/${filename}_${quality.id}p.m3u8`;
+				if (fs.existsSync(qualityPlaylistPath)) {
+					// Read playlist to get segment file names
+					const playlistContent = fs.readFileSync(qualityPlaylistPath, 'utf-8');
+					const playlistLines = playlistContent.split('\n');
+					for (const line of playlistLines) {
+						const trimmedLine = line.trim();
+						// Skip comments and empty lines
+						if (trimmedLine && !trimmedLine.startsWith('#')) {
+							// This is a segment file name
+							// Remove any path prefix if present
+							const segmentFile = path.basename(trimmedLine);
+							if (segmentFile.endsWith('.ts') && segmentFile.startsWith(filename)) {
+								// Only add if the file actually exists on disk
+								const segmentFilePath = `${outputDir}/${segmentFile}`;
+								if (fs.existsSync(segmentFilePath)) {
+									segmentFiles.add(segmentFile);
+								}
 							}
 						}
 					}
 				}
 			}
-		}
 
-		// Upload ONLY segment files first (not playlists - we'll rebuild them with UUIDs)
-		logger.info(`[transcode-video-operation] (${filename}) Uploading ${segmentFiles.size} segment files...`);
-		for (const segmentFile of segmentFiles) {
-			const filePathToUpload = `${outputDir}/${segmentFile}`;
-			if (!fs.existsSync(filePathToUpload)) {
-				logger.warn(`[transcode-video-operation] (${filename}) Segment file not found on disk: ${segmentFile}`);
-				continue;
-			}
-
-			try {
-				const fileId = await uploadFileToDirectus(filePathToUpload, targetFolderId);
-				fileIdMap[segmentFile] = fileId;
-				uploadedFiles.push({ filename_disk: segmentFile, id: fileId });
-			} catch (error) {
-				logger.error(`[transcode-video-operation] (${filename}) Error uploading segment ${segmentFile}:`, error);
-			}
-		}
-
-		// Determine reference type for playlists
-		const useFilenameDisk = playlist_reference_type === 'filename_disk';
-		const referenceTypeLabel = useFilenameDisk ? 'filename_disk' : 'file IDs';
-		logger.info(`[transcode-video-operation] (${filename}) Rebuilding playlists with ${referenceTypeLabel}...`);
-		
-		// Rebuild quality playlists with UUIDs and upload them
-		for (const quality of qualitiesRaw) {
-			const qualityPlaylistPath = `${outputDir}/${filename}_${quality.id}p.m3u8`;
-			if (fs.existsSync(qualityPlaylistPath)) {
-				// Verify file has content before rebuilding
-				const fileSize = fs.statSync(qualityPlaylistPath).size;
-				if (fileSize === 0) {
-					logger.warn(`[transcode-video-operation] (${filename}) Playlist file ${quality.id}p.m3u8 is empty, skipping rebuild`);
+			// Upload ONLY segment files first (not playlists - we'll rebuild them with UUIDs)
+			logger.info(`[transcode-video-operation] (${filename}) Uploading ${segmentFiles.size} segment files...`);
+			for (const segmentFile of segmentFiles) {
+				const filePathToUpload = `${outputDir}/${segmentFile}`;
+				if (!fs.existsSync(filePathToUpload)) {
+					logger.warn(`[transcode-video-operation] (${filename}) Segment file not found on disk: ${segmentFile}`);
 					continue;
 				}
-				
-				// Rebuild playlist: replace filenames with UUIDs from fileIdMap
-				const rebuiltContent = rebuildPlaylist(qualityPlaylistPath, fileIdMap, useFilenameDisk, logger);
-				if (!rebuiltContent || rebuiltContent.trim().length === 0) {
-					const playlistAction = targetStorageDriver === 'local' ? 'registration' : 'upload';
-					logger.warn(`[transcode-video-operation] (${filename}) Rebuilt playlist content is empty for ${quality.id}p, skipping ${playlistAction}`);
-					continue;
-				}
-				
-				// Write rebuilt playlist to disk
-				fs.writeFileSync(qualityPlaylistPath, rebuiltContent);
-				
-				// Upload the rebuilt playlist (first time - not a re-upload)
+
 				try {
-					const playlistBasename = path.basename(qualityPlaylistPath);
-					const playlistId = await uploadFileToDirectus(qualityPlaylistPath, targetFolderId);
-					fileIdMap[playlistBasename] = playlistId;
-					uploadedFiles.push({ filename_disk: playlistBasename, id: playlistId });
-					// Don't log individual playlist uploads to reduce log noise
+					const fileId = await uploadFileToDirectus(filePathToUpload, targetFolderId);
+					fileIdMap[segmentFile] = fileId;
+					uploadedFiles.push({ filename_disk: segmentFile, id: fileId });
 				} catch (error) {
-					const playlistAction = targetStorageDriver === 'local' ? 'registering' : 'uploading';
-					logger.error(`[transcode-video-operation] (${filename}) Error ${playlistAction} ${quality.id}p playlist:`, error);
+					logger.error(`[transcode-video-operation] (${filename}) Error uploading segment ${segmentFile}:`, error);
 				}
 			}
-		}
 
-		// Rebuild master playlist (masterPlaylistPath was already defined when creating it)
-		if (!fs.existsSync(masterPlaylistPath)) {
-			logger.error(`[transcode-video-operation] (${filename}) Master playlist file does not exist: ${masterPlaylistPath}`);
-			return {
-				error: `Master playlist file does not exist: ${masterPlaylistPath}`
-			};
-		}
-		
-		const masterFileSize = fs.statSync(masterPlaylistPath).size;
-		if (masterFileSize === 0) {
-			logger.error(`[transcode-video-operation] (${filename}) Master playlist file is empty: ${masterPlaylistPath}`);
-			return {
-				error: `Master playlist file is empty: ${masterPlaylistPath}`
-			};
-		}
-		
-		const masterContent = fs.readFileSync(masterPlaylistPath, 'utf-8');
-		if (!masterContent || masterContent.trim().length === 0) {
-			logger.error(`[transcode-video-operation] (${filename}) Master playlist content is empty: ${masterPlaylistPath}`);
-			return {
-				error: `Master playlist content is empty: ${masterPlaylistPath}`
-			};
-		}
-		
-		const masterLines = masterContent.split('\n');
-		const newMasterLines: string[] = [];
-
-		// UUID pattern: 8-4-4-4-12 hexadecimal characters
-		const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-		for (const line of masterLines) {
-			if (line.startsWith('#') || line.trim() === '') {
-				newMasterLines.push(line);
-			} else {
-				// Replace quality playlist filename with file ID or filename_disk
-				let playlistFilename = line.trim();
-				// Strip /assets/ prefix if present
-				if (playlistFilename.startsWith('/assets/')) {
-					playlistFilename = playlistFilename.substring('/assets/'.length);
-				}
-				
-				// If the line is already a UUID (file ID) and we're using file IDs, keep it as-is
-				if (uuidPattern.test(playlistFilename) && !useFilenameDisk) {
-					newMasterLines.push(playlistFilename);
-					continue;
-				}
-				
-				// Also try with just the basename
-				const basename = path.basename(playlistFilename);
-				const playlistId = fileIdMap[playlistFilename] || fileIdMap[basename];
-				if (playlistId) {
-					if (useFilenameDisk) {
-						// Use filename_disk (the original filename)
-						newMasterLines.push(playlistFilename);
-					} else {
-						// Use file ID (relative to master playlist location)
-						newMasterLines.push(playlistId);
+			// Determine reference type for playlists
+			const useFilenameDisk = playlist_reference_type === 'filename_disk';
+			const referenceTypeLabel = useFilenameDisk ? 'filename_disk' : 'file IDs';
+			logger.info(`[transcode-video-operation] (${filename}) Rebuilding playlists with ${referenceTypeLabel}...`);
+			
+			// Rebuild quality playlists with UUIDs and upload them
+			for (const quality of qualitiesRaw) {
+				const qualityPlaylistPath = `${outputDir}/${filename}_${quality.id}p.m3u8`;
+				if (fs.existsSync(qualityPlaylistPath)) {
+					// Verify file has content before rebuilding
+					const fileSize = fs.statSync(qualityPlaylistPath).size;
+					if (fileSize === 0) {
+						logger.warn(`[transcode-video-operation] (${filename}) Playlist file ${quality.id}p.m3u8 is empty, skipping rebuild`);
+						continue;
 					}
+					
+					// Rebuild playlist: replace filenames with UUIDs from fileIdMap
+					const rebuiltContent = rebuildPlaylist(qualityPlaylistPath, fileIdMap, useFilenameDisk, logger);
+					if (!rebuiltContent || rebuiltContent.trim().length === 0) {
+						const playlistAction = targetStorageDriver === 'local' ? 'registration' : 'upload';
+						logger.warn(`[transcode-video-operation] (${filename}) Rebuilt playlist content is empty for ${quality.id}p, skipping ${playlistAction}`);
+						continue;
+					}
+					
+					// Write rebuilt playlist to disk
+					fs.writeFileSync(qualityPlaylistPath, rebuiltContent);
+					
+					// Upload the rebuilt playlist (first time - not a re-upload)
+					try {
+						const playlistBasename = path.basename(qualityPlaylistPath);
+						const playlistId = await uploadFileToDirectus(qualityPlaylistPath, targetFolderId);
+						fileIdMap[playlistBasename] = playlistId;
+						uploadedFiles.push({ filename_disk: playlistBasename, id: playlistId });
+					} catch (error) {
+						const playlistAction = targetStorageDriver === 'local' ? 'registering' : 'uploading';
+						logger.error(`[transcode-video-operation] (${filename}) Error ${playlistAction} ${quality.id}p playlist:`, error);
+					}
+				}
+			}
+
+			// Rebuild master playlist (masterPlaylistPath was already defined when creating it)
+			if (!fs.existsSync(masterPlaylistPath)) {
+				logger.error(`[transcode-video-operation] (${filename}) Master playlist file does not exist: ${masterPlaylistPath}`);
+				return {
+					error: `Master playlist file does not exist: ${masterPlaylistPath}`
+				};
+			}
+			
+			const masterFileSize = fs.statSync(masterPlaylistPath).size;
+			if (masterFileSize === 0) {
+				logger.error(`[transcode-video-operation] (${filename}) Master playlist file is empty: ${masterPlaylistPath}`);
+				return {
+					error: `Master playlist file is empty: ${masterPlaylistPath}`
+				};
+			}
+			
+			const masterContent = fs.readFileSync(masterPlaylistPath, 'utf-8');
+			if (!masterContent || masterContent.trim().length === 0) {
+				logger.error(`[transcode-video-operation] (${filename}) Master playlist content is empty: ${masterPlaylistPath}`);
+				return {
+					error: `Master playlist content is empty: ${masterPlaylistPath}`
+				};
+			}
+			
+			const masterLines = masterContent.split('\n');
+			const newMasterLines: string[] = [];
+
+			// UUID pattern: 8-4-4-4-12 hexadecimal characters
+			const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+			for (const line of masterLines) {
+				if (line.startsWith('#') || line.trim() === '') {
+					newMasterLines.push(line);
+				} else {
+					// Replace quality playlist filename with file ID or filename_disk
+					let playlistFilename = line.trim();
+					// Strip /assets/ prefix if present
+					if (playlistFilename.startsWith('/assets/')) {
+						playlistFilename = playlistFilename.substring('/assets/'.length);
+					}
+					
+					// If the line is already a UUID (file ID) and we're using file IDs, keep it as-is
+					if (uuidPattern.test(playlistFilename) && !useFilenameDisk) {
+						newMasterLines.push(playlistFilename);
+						continue;
+					}
+					
+					// Also try with just the basename
+					const basename = path.basename(playlistFilename);
+					const playlistId = fileIdMap[playlistFilename] || fileIdMap[basename];
+					if (playlistId) {
+						if (useFilenameDisk) {
+							// Use filename_disk (the original filename)
+							newMasterLines.push(playlistFilename);
+						} else {
+							// Use file ID (relative to master playlist location)
+							newMasterLines.push(playlistId);
+						}
 					} else {
 						// Keep original if not found (might be from previous run with different file IDs)
 						newMasterLines.push(line);
 					}
+				}
 			}
-		}
 
-		fs.writeFileSync(masterPlaylistPath, newMasterLines.join('\n'));
-		
-		// Register/upload master playlist
-		let masterId: string | null = null;
-		try {
-			masterId = await uploadFileToDirectus(masterPlaylistPath, targetFolderId);
-			fileIdMap[path.basename(masterPlaylistPath)] = masterId;
-			uploadedFiles.push({ filename_disk: path.basename(masterPlaylistPath), id: masterId });
-			// Don't log master playlist upload to reduce log noise
-		} catch (error) {
-			const masterAction = targetStorageDriver === 'local' ? 'registering' : 'uploading';
-			logger.error(`[transcode-video-operation] (${filename}) Error ${masterAction} master playlist:`, error);
+			fs.writeFileSync(masterPlaylistPath, newMasterLines.join('\n'));
+			
+			// Register/upload master playlist
+			try {
+				masterId = await uploadFileToDirectus(masterPlaylistPath, targetFolderId);
+				fileIdMap[path.basename(masterPlaylistPath)] = masterId;
+				uploadedFiles.push({ filename_disk: path.basename(masterPlaylistPath), id: masterId });
+			} catch (error) {
+				const masterAction = targetStorageDriver === 'local' ? 'registering' : 'uploading';
+				logger.error(`[transcode-video-operation] (${filename}) Error ${masterAction} master playlist:`, error);
+			}
 		}
 
 		// AI Caption & Speech2Text Generation
 		let subtitleId: string | null = null;
 		let audioId: string | null = null;
 		let s2tSubtitleId: string | null = null;
+		let s2tJsonId: string | null = null;
 		let s2tErrorMessage: string | null = null;
 		let tempAudioPath: string | null = null;
 
-		if (generate_captions || generate_speech2text) {
+		let runAudioExtraction = false;
+		if (process_mode === 'all' && (generate_captions || generate_speech2text)) {
+			runAudioExtraction = true;
+		} else if (process_mode === 'audio_only') {
+			runAudioExtraction = true;
+		} else if (process_mode === 'transcription_only' && !isAudioInput) {
+			runAudioExtraction = true;
+		}
+
+		if (runAudioExtraction) {
 			try {
 				const tempDir = path.join(process.env.PWD || '/directus', 'tmp', 'transcode');
 				if (!fs.existsSync(tempDir)) {
@@ -1667,14 +1739,26 @@ export default {
 				}
 				tempAudioPath = path.join(tempDir, `${filename}_temp_audio.mp3`);
 				
-				// 1. Extract audio track from video
-				await extractAudio(filePath, tempAudioPath, validatedNice);
+				let forceMono = false;
+				if (process_mode === 'audio_only') {
+					forceMono = true;
+				} else if (process_mode === 'transcription_only') {
+					forceMono = true;
+				} else if (process_mode === 'all' && generate_speech2text && speech2text_diarization) {
+					forceMono = true;
+				}
+
+				logger.info(`[transcode-video-operation] (${filename}) Extracting audio track. Force mono: ${forceMono}`);
+				await extractAudio(filePath, tempAudioPath, forceMono, validatedNice);
 			} catch (extractError) {
 				logger.error(`[transcode-video-operation] (${filename}) Audio extraction failed: %s`, extractError instanceof Error ? extractError.stack || extractError.message : String(extractError));
 			}
+		} else if (process_mode === 'transcription_only' && isAudioInput) {
+			tempAudioPath = filePath;
+			logger.info(`[transcode-video-operation] (${filename}) Using existing audio input file directly for transcription: ${tempAudioPath}`);
 		}
 
-		if (generate_captions && tempAudioPath && fs.existsSync(tempAudioPath)) {
+		if (process_mode === 'all' && generate_captions && tempAudioPath && fs.existsSync(tempAudioPath)) {
 			try {
 				logger.info(`[transcode-video-operation] (${filename}) Initiating AI subtitle generation...`);
 				
@@ -1703,33 +1787,65 @@ export default {
 			}
 		}
 
-		if (generate_speech2text && tempAudioPath && fs.existsSync(tempAudioPath)) {
+		// Determine S2T and audio permanent save options
+		const shouldRunSpeech2Text = (process_mode === 'transcription_only') || (process_mode === 'all' && generate_speech2text);
+
+		if (tempAudioPath && fs.existsSync(tempAudioPath)) {
+			const shouldSaveAudioPermanently = (process_mode === 'audio_only') || 
+				(process_mode === 'all' && generate_speech2text) ||
+				(process_mode === 'transcription_only' && !isAudioInput);
+
+			if (shouldSaveAudioPermanently) {
+				try {
+					const audioFilename = `${filename}_audio.mp3`;
+					const permanentAudioPath = path.join(outputDir, audioFilename);
+					
+					// Copy/move temporary audio to outputDir
+					if (tempAudioPath !== permanentAudioPath) {
+						fs.copyFileSync(tempAudioPath, permanentAudioPath);
+					}
+					logger.info(`[transcode-video-operation] (${filename}) Permanent audio file saved locally: ${permanentAudioPath}`);
+					
+					// Upload audio to Directus
+					logger.info(`[transcode-video-operation] (${filename}) Uploading permanent audio to Directus folder...`);
+					audioId = await uploadFileToDirectus(permanentAudioPath, targetFolderId, {
+						mimetype: 'audio/mpeg'
+					});
+					
+					if (audioId) {
+						fileIdMap[audioFilename] = audioId;
+						uploadedFiles.push({ filename_disk: audioFilename, id: audioId });
+						logger.info(`[transcode-video-operation] (${filename}) Permanent audio uploaded successfully. ID: ${audioId}`);
+					} else {
+						throw new Error("Failed to upload permanent audio file to Directus");
+					}
+				} catch (audioError) {
+					logger.error(`[transcode-video-operation] (${filename}) Failed to save/upload permanent audio: %s`, audioError instanceof Error ? audioError.message : String(audioError));
+				}
+			} else if (process_mode === 'transcription_only' && isAudioInput) {
+				// Re-use the existing file ID from Directus
+				try {
+					let fileId: string | null = null;
+					if (typeof file === 'string') {
+						fileId = file;
+					} else if (fileObject.id) {
+						fileId = String(fileObject.id);
+					} else if ((fileObject as any).data?.id) {
+						fileId = String((fileObject as any).data.id);
+					}
+					audioId = fileId;
+					logger.info(`[transcode-video-operation] (${filename}) Reusing existing input audio file ID for transcription: ${audioId}`);
+				} catch (e) {
+					logger.error(`[transcode-video-operation] (${filename}) Error getting audio file ID: %s`, e instanceof Error ? e.message : String(e));
+				}
+			}
+		}
+
+		if (shouldRunSpeech2Text && audioId) {
 			let jobSelfUrl: string | null = null;
 			let subscriptionKey: string | null = null;
 			try {
 				logger.info(`[transcode-video-operation] (${filename}) Initiating AI Speech2Text flow...`);
-				
-				// Save audio permanently in target folder
-				const audioFilename = `${filename}_audio.mp3`;
-				const permanentAudioPath = path.join(outputDir, audioFilename);
-				
-				// Copy/move temporary audio to outputDir
-				fs.copyFileSync(tempAudioPath, permanentAudioPath);
-				logger.info(`[transcode-video-operation] (${filename}) Permanent audio file saved locally: ${permanentAudioPath}`);
-				
-				// Upload audio to Directus
-				logger.info(`[transcode-video-operation] (${filename}) Uploading permanent audio to Directus folder...`);
-				audioId = await uploadFileToDirectus(permanentAudioPath, targetFolderId, {
-					mimetype: 'audio/mpeg'
-				});
-				
-				if (audioId) {
-					fileIdMap[audioFilename] = audioId;
-					uploadedFiles.push({ filename_disk: audioFilename, id: audioId });
-					logger.info(`[transcode-video-operation] (${filename}) Permanent audio uploaded successfully. ID: ${audioId}`);
-				} else {
-					throw new Error("Failed to upload permanent audio file to Directus");
-				}
 				
 				// Submit Speech2Text job to Azure
 				const speech2textUrl = speech2text_endpoint || 'https://swedencentral.api.cognitive.microsoft.com/speechtotext/v3.2/transcriptions';
@@ -1859,8 +1975,26 @@ export default {
 				
 				// Convert to SRT
 				logger.info(`[transcode-video-operation] (${filename}) Converting transcription JSON to SRT format...`);
-				const srtContent = convertAzureJsonToSrt(transcriptionJson);
+				const srtContent = convertAzureJsonToSrt(transcriptionJson, speech2text_speaker_map);
 				
+				// Save raw JSON transcription permanently to target outputDir
+				const s2tJsonFilename = `${filename}_s2t_transcription.json`;
+				const s2tJsonLocalPath = path.join(outputDir, s2tJsonFilename);
+				fs.writeFileSync(s2tJsonLocalPath, JSON.stringify(transcriptionJson, null, 2));
+				logger.info(`[transcode-video-operation] (${filename}) Speech2Text raw JSON saved locally: ${s2tJsonLocalPath}`);
+
+				// Upload raw JSON to Directus
+				logger.info(`[transcode-video-operation] (${filename}) Uploading Speech2Text raw JSON file to Directus folder...`);
+				s2tJsonId = await uploadFileToDirectus(s2tJsonLocalPath, targetFolderId, {
+					mimetype: 'application/json'
+				});
+
+				if (s2tJsonId) {
+					fileIdMap[s2tJsonFilename] = s2tJsonId;
+					uploadedFiles.push({ filename_disk: s2tJsonFilename, id: s2tJsonId });
+					logger.info(`[transcode-video-operation] (${filename}) Speech2Text raw JSON uploaded successfully. ID: ${s2tJsonId}`);
+				}
+
 				// Save SRT file to target outputDir
 				const s2tSubtitleFilename = `${filename}_s2t_subtitle.srt`;
 				const s2tSubtitleLocalPath = path.join(outputDir, s2tSubtitleFilename);
@@ -1941,7 +2075,7 @@ export default {
 		}
 
 		// Clean up temporary audio track
-		if (tempAudioPath) {
+		if (tempAudioPath && tempAudioPath !== filePath) {
 			try {
 				if (fs.existsSync(tempAudioPath)) {
 					fs.unlinkSync(tempAudioPath);
@@ -1954,26 +2088,29 @@ export default {
 
 		// Determine available qualities
 		const availableQualities: number[] = [];
-		for (const quality of qualitiesRaw) {
-			const qualityFile = `${outputDir}/${filename}_${quality.id}p.m3u8`;
-			if (fs.existsSync(qualityFile)) {
-				availableQualities.push(quality.id);
+		if (qualitiesRaw && qualitiesRaw.length > 0) {
+			for (const quality of qualitiesRaw) {
+				const qualityFile = `${outputDir}/${filename}_${quality.id}p.m3u8`;
+				if (fs.existsSync(qualityFile)) {
+					availableQualities.push(quality.id);
+				}
 			}
 		}
 
 		return {
-			master: { id: masterId, filename_disk: `${filename}_master.m3u8` },
+			master: masterId ? { id: masterId, filename_disk: `${filename}_master.m3u8` } : null,
 			metadata: {
-				availableQualities,
-				dimensions: {
+				availableQualities: availableQualities.length > 0 ? availableQualities : null,
+				dimensions: metadata.width && metadata.height ? {
 					width: metadata.width,
 					height: metadata.height,
 					isVertical: metadata.isVertical
-				},
+				} : null,
 				duration: metadata.duration,
 				thumbnail: thumbnailId,
 				subtitle: subtitleId,
 				audio: audioId,
+				s2t_json: s2tJsonId,
 				s2t_subtitle: s2tSubtitleId,
 				s2t_error: s2tErrorMessage
 			},

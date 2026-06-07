@@ -3,7 +3,7 @@ export default {
 	name: 'Transcode Video Operation',
 	icon: 'extension',
 	description: 'Transcode input file to HLS streams with multiple quality levels',
-	overview: ({ file, folder_id }: { file?: any; folder_id?: string }) => [
+	overview: ({ file, folder_id, process_mode }: { file?: any; folder_id?: string; process_mode?: string }) => [
 		{
 			label: 'File',
 			text: file,
@@ -11,6 +11,10 @@ export default {
 		{
 			label: 'Folder ID',
 			text: folder_id,
+		},
+		{
+			label: 'Process Mode',
+			text: process_mode || 'all',
 		}
 	],
 	options: [
@@ -44,6 +48,27 @@ export default {
 			},
 		},
 		{
+			field: 'process_mode',
+			name: 'Process Mode',
+			type: 'string',
+			meta: {
+				width: 'half',
+				interface: 'select-dropdown',
+				options: {
+					choices: [
+						{ text: 'Full Transcode & Transcription (default)', value: 'all' },
+						{ text: 'Process only HLS from existing video', value: 'hls_only' },
+						{ text: 'Process to mono audio only (mp3 mono) from existing video', value: 'audio_only' },
+						{ text: 'Process to transcript only from existing mp3 mono', value: 'transcription_only' }
+					]
+				},
+				note: 'Select operational mode. Options range from HLS-only or audio-only extraction to transcription-only from mono audio.'
+			},
+			schema: {
+				default_value: 'all'
+			}
+		},
+		{
 			field: 'keyBaseUrl',
 			name: 'Key Base URL',
 			type: 'string',
@@ -54,6 +79,17 @@ export default {
 					placeholder: 'https://cdn.example.com/keys',
 				},
 				note: 'Optional. The public URL prefix for the encryption key. If left blank, a relative path will be used.',
+				conditions: [
+					{
+						name: 'Hide HLS settings',
+						rule: {
+							process_mode: {
+								_in: ['audio_only', 'transcription_only']
+							}
+						},
+						hidden: true
+					}
+				]
 			},
 			schema: {
 				required: false,
@@ -72,7 +108,18 @@ export default {
 						{ text: 'Filename Disk (custom)', value: 'filename_disk' }
 					]
 				},
-				note: 'How playlists should reference segments: File UUIDs for files in Directus (/assets/:uuid) or Filename Disk for resources stored in a custom location (/stream/:filename_disk.m3u8)'
+				note: 'How playlists should reference segments: File UUIDs for files in Directus (/assets/:uuid) or Filename Disk for resources stored in a custom location (/stream/:filename_disk.m3u8)',
+				conditions: [
+					{
+						name: 'Hide HLS settings',
+						rule: {
+							process_mode: {
+								_in: ['audio_only', 'transcription_only']
+							}
+						},
+						hidden: true
+					}
+				]
 			},
 			schema: {
 				default_value: 'id'
@@ -93,7 +140,18 @@ export default {
 						{ text: '4K', value: '2160p' }
 					]
 				},
-				note: 'Select the quality levels to transcode the video to. The maximum quality level depends on the input video (no upscaling).'
+				note: 'Select the quality levels to transcode the video to. The maximum quality level depends on the input video (no upscaling).',
+				conditions: [
+					{
+						name: 'Hide HLS settings',
+						rule: {
+							process_mode: {
+								_in: ['audio_only', 'transcription_only']
+							}
+						},
+						hidden: true
+					}
+				]
 			},
 			schema: {
 				default_value: ['240p', '480p', '720p', '1080p', '2160p']
@@ -170,7 +228,18 @@ export default {
 				special: ['alias', 'no-data'],
 				options: {
 					title: 'Performance Settings'
-				}
+				},
+				conditions: [
+					{
+						name: 'Hide performance settings',
+						rule: {
+							process_mode: {
+								_eq: 'transcription_only'
+							}
+						},
+						hidden: true
+					}
+				]
 			},
 			schema: {}
 		},
@@ -186,7 +255,18 @@ export default {
 					min: 0,
 					step: 1
 				},
-				note: 'Number of threads to use for transcoding. Use 1 for single-threaded, or 0 to use all available CPU cores. Default: 1'
+				note: 'Number of threads to use for transcoding. Use 1 for single-threaded, or 0 to use all available CPU cores. Default: 1',
+				conditions: [
+					{
+						name: 'Hide performance settings',
+						rule: {
+							process_mode: {
+								_eq: 'transcription_only'
+							}
+						},
+						hidden: true
+					}
+				]
 			},
 			schema: {
 				default_value: 1
@@ -205,7 +285,18 @@ export default {
 					max: 19,
 					step: 1
 				},
-				note: 'Process priority (nice value) for transcoding. Range: 0 (highest) to 19 (lowest). Keep priority low when transcoding kills your system.'
+				note: 'Process priority (nice value) for transcoding. Range: 0 (highest) to 19 (lowest). Keep priority low when transcoding kills your system.',
+				conditions: [
+					{
+						name: 'Hide performance settings',
+						rule: {
+							process_mode: {
+								_eq: 'transcription_only'
+							}
+						},
+						hidden: true
+					}
+				]
 			},
 			schema: {
 				default_value: 19,
@@ -222,7 +313,18 @@ export default {
 				special: ['alias', 'no-data'],
 				options: {
 					title: 'AI Caption Settings'
-				}
+				},
+				conditions: [
+					{
+						name: 'Hide when not in all mode',
+						rule: {
+							process_mode: {
+								_neq: 'all'
+							}
+						},
+						hidden: true
+					}
+				]
 			},
 			schema: {}
 		},
@@ -233,7 +335,18 @@ export default {
 			meta: {
 				width: 'half',
 				interface: 'boolean',
-				note: 'Automatically generate subtitles/captions using AI Whisper model.'
+				note: 'Automatically generate subtitles/captions using AI Whisper model.',
+				conditions: [
+					{
+						name: 'Hide when not in all mode',
+						rule: {
+							process_mode: {
+								_neq: 'all'
+							}
+						},
+						hidden: true
+					}
+				]
 			},
 			schema: {
 				default_value: false
@@ -252,11 +365,20 @@ export default {
 				note: 'ISO 639-1 code of language. Leave blank for Whisper auto-detection.',
 				conditions: [
 					{
-						name: 'Hide when generate_captions is false',
+						name: 'Hide captions settings',
 						rule: {
-							generate_captions: {
-								_eq: false
-							}
+							_or: [
+								{
+									process_mode: {
+										_neq: 'all'
+									}
+								},
+								{
+									generate_captions: {
+										_eq: false
+									}
+								}
+							]
 						},
 						hidden: true
 					}
@@ -279,11 +401,20 @@ export default {
 				note: 'Optional override for the AI Whisper API Endpoint. If left blank, environment default will be used.',
 				conditions: [
 					{
-						name: 'Hide when generate_captions is false',
+						name: 'Hide captions settings',
 						rule: {
-							generate_captions: {
-								_eq: false
-							}
+							_or: [
+								{
+									process_mode: {
+										_neq: 'all'
+									}
+								},
+								{
+									generate_captions: {
+										_eq: false
+									}
+								}
+							]
 						},
 						hidden: true
 					}
@@ -303,11 +434,20 @@ export default {
 				note: 'Optional override for the AI Whisper API key.',
 				conditions: [
 					{
-						name: 'Hide when generate_captions is false',
+						name: 'Hide captions settings',
 						rule: {
-							generate_captions: {
-								_eq: false
-							}
+							_or: [
+								{
+									process_mode: {
+										_neq: 'all'
+									}
+								},
+								{
+									generate_captions: {
+										_eq: false
+									}
+								}
+							]
 						},
 						hidden: true
 					}
@@ -334,11 +474,20 @@ export default {
 				note: 'Authentication header format strategy.',
 				conditions: [
 					{
-						name: 'Hide when generate_captions is false',
+						name: 'Hide captions settings',
 						rule: {
-							generate_captions: {
-								_eq: false
-							}
+							_or: [
+								{
+									process_mode: {
+										_neq: 'all'
+									}
+								},
+								{
+									generate_captions: {
+										_eq: false
+									}
+								}
+							]
 						},
 						hidden: true
 					}
@@ -358,7 +507,18 @@ export default {
 				special: ['alias', 'no-data'],
 				options: {
 					title: 'AI Speech2Text Settings'
-				}
+				},
+				conditions: [
+					{
+						name: 'Hide S2T settings',
+						rule: {
+							process_mode: {
+								_in: ['hls_only', 'audio_only']
+							}
+						},
+						hidden: true
+					}
+				]
 			},
 			schema: {}
 		},
@@ -369,7 +529,18 @@ export default {
 			meta: {
 				width: 'half',
 				interface: 'boolean',
-				note: 'Extract and permanently save audio, then generate SRT subtitles using Azure Speech-to-Text batch transcription.'
+				note: 'Extract and permanently save audio, then generate SRT subtitles using Azure Speech-to-Text batch transcription.',
+				conditions: [
+					{
+						name: 'Hide S2T settings',
+						rule: {
+							process_mode: {
+								_in: ['hls_only', 'audio_only']
+							}
+						},
+						hidden: true
+					}
+				]
 			},
 			schema: {
 				default_value: false
@@ -388,11 +559,29 @@ export default {
 				note: 'The locale/language code for transcription.',
 				conditions: [
 					{
-						name: 'Hide when generate_speech2text is false',
+						name: 'Hide speech2text settings',
 						rule: {
-							generate_speech2text: {
-								_eq: false
-							}
+							_or: [
+								{
+									process_mode: {
+										_in: ['hls_only', 'audio_only']
+									}
+								},
+								{
+									_and: [
+										{
+											process_mode: {
+												_eq: 'all'
+											}
+										},
+										{
+											generate_speech2text: {
+												_eq: false
+											}
+										}
+									]
+								}
+							]
 						},
 						hidden: true
 					}
@@ -416,11 +605,29 @@ export default {
 				note: 'Optional. URL for the Azure Speech-to-Text batch transcription API.',
 				conditions: [
 					{
-						name: 'Hide when generate_speech2text is false',
+						name: 'Hide speech2text settings',
 						rule: {
-							generate_speech2text: {
-								_eq: false
-							}
+							_or: [
+								{
+									process_mode: {
+										_in: ['hls_only', 'audio_only']
+									}
+								},
+								{
+									_and: [
+										{
+											process_mode: {
+												_eq: 'all'
+											}
+										},
+										{
+											generate_speech2text: {
+												_eq: false
+											}
+										}
+									]
+								}
+							]
 						},
 						hidden: true
 					}
@@ -440,11 +647,29 @@ export default {
 				note: 'Optional override for the Azure subscription API key (Ocp-Apim-Subscription-Key). If left blank, environment variable SPEECH2TEXT_SUBSCRIPTION_KEY is used.',
 				conditions: [
 					{
-						name: 'Hide when generate_speech2text is false',
+						name: 'Hide speech2text settings',
 						rule: {
-							generate_speech2text: {
-								_eq: false
-							}
+							_or: [
+								{
+									process_mode: {
+										_in: ['hls_only', 'audio_only']
+									}
+								},
+								{
+									_and: [
+										{
+											process_mode: {
+												_eq: 'all'
+											}
+										},
+										{
+											generate_speech2text: {
+												_eq: false
+											}
+										}
+									]
+								}
+							]
 						},
 						hidden: true
 					}
@@ -464,11 +689,29 @@ export default {
 				note: 'Optional. Directus static access token to append to the audio URL, allowing Azure to download private assets.',
 				conditions: [
 					{
-						name: 'Hide when generate_speech2text is false',
+						name: 'Hide speech2text settings',
 						rule: {
-							generate_speech2text: {
-								_eq: false
-							}
+							_or: [
+								{
+									process_mode: {
+										_in: ['hls_only', 'audio_only']
+									}
+								},
+								{
+									_and: [
+										{
+											process_mode: {
+												_eq: 'all'
+											}
+										},
+										{
+											generate_speech2text: {
+												_eq: false
+											}
+										}
+									]
+								}
+							]
 						},
 						hidden: true
 					}
@@ -488,11 +731,29 @@ export default {
 				note: 'Identify different speakers (diarization).',
 				conditions: [
 					{
-						name: 'Hide when generate_speech2text is false',
+						name: 'Hide speech2text settings',
 						rule: {
-							generate_speech2text: {
-								_eq: false
-							}
+							_or: [
+								{
+									process_mode: {
+										_in: ['hls_only', 'audio_only']
+									}
+								},
+								{
+									_and: [
+										{
+											process_mode: {
+												_eq: 'all'
+											}
+										},
+										{
+											generate_speech2text: {
+												_eq: false
+											}
+										}
+									]
+								}
+							]
 						},
 						hidden: true
 					}
@@ -500,6 +761,52 @@ export default {
 			},
 			schema: {
 				default_value: true
+			}
+		},
+		{
+			field: 'speech2text_speaker_map',
+			name: 'Speech2Text Speaker Map',
+			type: 'json',
+			meta: {
+				width: 'half',
+				interface: 'input-code',
+				options: {
+					language: 'json',
+					placeholder: '{\n  "1": "Mursyid Zamxzam",\n  "2": "Pak Mustafa"\n}'
+				},
+				note: 'Optional. JSON mapping of speaker IDs to names (e.g. {"1": "Mursyid Zamxzam"}). Enclosed in square brackets.',
+				conditions: [
+					{
+						name: 'Hide speech2text settings',
+						rule: {
+							_or: [
+								{
+									process_mode: {
+										_in: ['hls_only', 'audio_only']
+									}
+								},
+								{
+									_and: [
+										{
+											process_mode: {
+												_eq: 'all'
+											}
+										},
+										{
+											generate_speech2text: {
+												_eq: false
+											}
+										}
+									]
+								}
+							]
+						},
+						hidden: true
+					}
+				]
+			},
+			schema: {
+				required: false
 			}
 		}
 	],
