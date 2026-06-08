@@ -117,13 +117,13 @@ interface OperationResult {
 export default {
 	id: 'transcode-video-operation',
 	handler: async (
-		{ 
-			file, 
-			folder_id, 
+		{
+			file,
+			folder_id,
 			process_mode = 'all',
 			keyBaseUrl,
-			playlist_reference_type = 'id', 
-			qualities = ['240p', '480p', '720p', '1080p', '2160p'], 
+			playlist_reference_type = 'id',
+			qualities = ['240p', '480p', '720p', '1080p', '2160p'],
 			threads = 1,
 			nice,
 			storage_adapter = 'default',
@@ -141,7 +141,7 @@ export default {
 			speech2text_access_token,
 			speech2text_speaker_map,
 			speech2text_timeout
-		}: OperationInput, 
+		}: OperationInput,
 		{ env, services, getSchema, logger }: OperationContext
 	): Promise<OperationResult | { error: string }> => {
 		if (!file) {
@@ -162,7 +162,7 @@ export default {
 				const filesService = new FilesService({
 					schema: await getSchema(),
 				});
-				
+
 				const fileRecord = await filesService.readOne(file);
 				fileObject = fileRecord as File;
 				logger.info(`[transcode-video-operation] Fetched file from UUID: ${file}`);
@@ -184,7 +184,7 @@ export default {
 
 		// Resolve baseUrl early for both downloading source files and constructing S2T callback URLs
 		const getHostPort = (): string => {
-			const host = env.HOST && typeof env.HOST === 'string' && env.HOST.trim() !== '' 
+			const host = env.HOST && typeof env.HOST === 'string' && env.HOST.trim() !== ''
 				? (env.HOST.trim() === '0.0.0.0' ? 'localhost' : env.HOST.trim())
 				: 'localhost';
 			const port = env.PORT && typeof env.PORT === 'string' && env.PORT.trim() !== ''
@@ -192,7 +192,7 @@ export default {
 				: (env.PORT && typeof env.PORT === 'number' ? String(env.PORT) : '8055');
 			return `http://${host}:${port}`;
 		};
-		
+
 		let baseUrl: string;
 		const publicUrlRaw = env.PUBLIC_URL;
 		if (publicUrlRaw && typeof publicUrlRaw === 'string') {
@@ -207,8 +207,8 @@ export default {
 		}
 
 		// Get available storage locations from environment (STORAGE_LOCATIONS can be CSV string or array)
-		const storageLocations = env.STORAGE_LOCATIONS 
-			? Array.isArray(env.STORAGE_LOCATIONS) 
+		const storageLocations = env.STORAGE_LOCATIONS
+			? Array.isArray(env.STORAGE_LOCATIONS)
 				? env.STORAGE_LOCATIONS.map(loc => String(loc).trim())
 				: String(env.STORAGE_LOCATIONS).split(',').map(loc => loc.trim())
 			: [];
@@ -274,43 +274,43 @@ export default {
 
 		// outputDir will be set later based on the target storage location
 		let outputDir: string;
-		
+
 		// Function to generate optimized quality options for raw exec commands
 		const getQualityOptionsRaw = (isHighBitDepth = false, keyInfoPath?: string): QualityOption[] => {
 			// Always use main profile for maximum compatibility
 			const profile = 'main';
-			
+
 			// Add pixel format conversion for high bit depth videos
 			const pixelFormat = isHighBitDepth ? 'format=yuv420p,' : '';
-			
+
 			// Add encryption options if keyInfoPath is provided
 			const encryptionOptions = keyInfoPath ? `-hls_key_info_file ${keyInfoPath}` : '';
-			
+
 			return [
-				{ 
-					id: 240, 
+				{
+					id: 240,
 					options: `-vf "${pixelFormat}scale=w='min(426,iw)':h='min(240,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 22 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 400k -maxrate 428k -bufsize 600k -b:a 64k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_240p_%03d.ts ${outputDir}/${filename}_240p.m3u8`
 				},
-				{ 
-					id: 480, 
+				{
+					id: 480,
 					options: `-vf "${pixelFormat}scale=w='min(854,iw)':h='min(480,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 1400k -maxrate 1498k -bufsize 2100k -b:a 128k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_480p_%03d.ts ${outputDir}/${filename}_480p.m3u8`
 				},
-				{ 
-					id: 720, 
+				{
+					id: 720,
 					options: `-vf "${pixelFormat}scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 2800k -maxrate 2996k -bufsize 4200k -b:a 128k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_720p_%03d.ts ${outputDir}/${filename}_720p.m3u8`
 				},
-				{ 
-					id: 1080, 
+				{
+					id: 1080,
 					options: `-vf "${pixelFormat}scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 5000k -maxrate 5350k -bufsize 7500k -b:a 192k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_1080p_%03d.ts ${outputDir}/${filename}_1080p.m3u8`
 				},
-				{ 
-					id: 2160, 
+				{
+					id: 2160,
 					options: `-vf "${pixelFormat}scale=w='min(3840,iw)':h='min(2160,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 20000k -maxrate 21400k -bufsize 30000k -b:a 192k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_2160p_%03d.ts ${outputDir}/${filename}_2160p.m3u8`
 				}
 			];
 		};
 		const hlsFolderId = folder_id;
-		
+
 		const readFiles = (linkFilePath: string): string[] => {
 			const data = fs.readdirSync(linkFilePath, 'utf-8').filter(fn => fn.startsWith(filename));
 			return data;
@@ -319,7 +319,7 @@ export default {
 		// Get video/audio metadata (dimensions, duration)
 		const getVideoMetadata = async (inputFile: string): Promise<VideoMetadata> => {
 			return new Promise((resolve, reject) => {
-				exec(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height:format=duration -of json ${inputFile}`, 
+				exec(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height:format=duration -of json ${inputFile}`,
 					(error, stdout) => {
 						if (error) {
 							// Try to query just format duration as fallback (for audio inputs)
@@ -339,24 +339,24 @@ export default {
 							});
 							return;
 						}
-						
+
 						try {
 							const data = JSON.parse(stdout);
 							const stream = data.streams?.[0];
 							const format = data.format;
-							
+
 							if (!stream || !stream.width || !stream.height) {
 								// Fallback for audio files
 								const duration = format?.duration ? Math.floor(parseFloat(format.duration) * 1000) : 0;
 								resolve({ width: 0, height: 0, isVertical: false, duration });
 								return;
 							}
-							
+
 							const width = parseInt(stream.width);
 							const height = parseInt(stream.height);
 							const duration = format?.duration ? Math.floor(parseFloat(format.duration) * 1000) : 0;
 							const isVertical = height > width;
-							
+
 							resolve({ width, height, isVertical, duration });
 						} catch (parseError) {
 							logger.error(`[transcode-video-operation] (${filename}) Error parsing metadata:`, parseError);
@@ -378,7 +378,7 @@ export default {
 						reject(error);
 						return;
 					}
-					
+
 					// Verify the thumbnail file was actually created and has content
 					if (!fs.existsSync(outputPath)) {
 						const errorMsg = `Thumbnail file was not created: ${outputPath}`;
@@ -389,7 +389,7 @@ export default {
 						reject(new Error(errorMsg));
 						return;
 					}
-					
+
 					const fileSize = fs.statSync(outputPath).size;
 					if (fileSize === 0) {
 						const errorMsg = `Thumbnail file is empty: ${outputPath}`;
@@ -400,7 +400,7 @@ export default {
 						reject(new Error(errorMsg));
 						return;
 					}
-					
+
 					resolve(outputPath);
 				});
 			});
@@ -409,26 +409,26 @@ export default {
 		// Get image metadata (dimensions)
 		const getImageMetadata = async (imagePath: string): Promise<ImageMetadata> => {
 			return new Promise((resolve, reject) => {
-				exec(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of json ${imagePath}`, 
+				exec(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of json ${imagePath}`,
 					(error, stdout) => {
 						if (error) {
 							logger.error(`[transcode-video-operation] (${filename}) Error getting image metadata:`, error);
 							reject(error);
 							return;
 						}
-						
+
 						try {
 							const data = JSON.parse(stdout);
 							const stream = data.streams?.[0];
-							
+
 							if (!stream || !stream.width || !stream.height) {
 								reject(new Error('Could not get image dimensions'));
 								return;
 							}
-							
+
 							const width = parseInt(stream.width);
 							const height = parseInt(stream.height);
-							
+
 							resolve({ width, height });
 						} catch (parseError) {
 							logger.error(`[transcode-video-operation] (${filename}) Error parsing image metadata:`, parseError);
@@ -473,14 +473,14 @@ export default {
 				}
 
 				const newFolder = await foldersService.createOne(folderData);
-				
+
 				// Try different possible response structures
 				const folderId = newFolder?.id || newFolder?.data?.id || (typeof newFolder === 'string' ? newFolder : null);
-				
+
 				if (!folderId) {
 					throw new Error(`Failed to get folder ID from response: ${JSON.stringify(newFolder)}`);
 				}
-				
+
 				logger.info(`[transcode-video-operation] (${filename}) Created folder with ID: ${folderId}`);
 				return String(folderId);
 			} catch (error) {
@@ -493,8 +493,8 @@ export default {
 		// For local storage: file is already on disk, FilesService just creates the DB record
 		// For cloud storage (S3, GCS, etc.): FilesService automatically uploads the file stream to the configured storage adapter
 		const uploadFileToDirectus = async (
-			filePath: string, 
-			folderId: string | null = null, 
+			filePath: string,
+			folderId: string | null = null,
 			options: { mimetype?: string; width?: number | null; height?: number | null; storage?: string } = {}
 		): Promise<string> => {
 			try {
@@ -505,20 +505,20 @@ export default {
 
 				const fileName = path.basename(filePath);
 				const extension = fileName.substr(fileName.lastIndexOf('.') + 1);
-				
+
 				// Verify file exists before attempting upload
 				if (!fs.existsSync(filePath)) {
 					throw new Error(`File does not exist: ${filePath}`);
 				}
-				
+
 				const fileSizeInBytes = fs.statSync(filePath).size;
 				const isLocalStorage = targetStorageDriver === 'local';
-				
+
 				// Only log for cloud storage uploads, not for local storage registration
 				if (!isLocalStorage) {
 					logger.info(`[transcode-video-operation] (${filename}) Uploading file: ${fileName} (${fileSizeInBytes} bytes) to storage: ${targetStorageAdapter}`);
 				}
-				
+
 				const types: Record<string, string> = {
 					ts: "video/mp2t",
 					mp4: "video/mp4",
@@ -587,7 +587,7 @@ export default {
 					} else {
 						// For cloud storage: create a stream and upload to the configured storage adapter
 						const fileStream = fs.createReadStream(filePath);
-						
+
 						// Handle stream errors
 						fileStream.on('error', (streamError) => {
 							logger.error(`[transcode-video-operation] (${filename}) File stream error for ${fileName}:`, streamError);
@@ -600,7 +600,7 @@ export default {
 							fileData
 						);
 					}
-					
+
 					// Verify which storage was actually used by reading the file record back
 					try {
 						const uploadedFileRecord = await filesService.readOne(fileId);
@@ -611,7 +611,7 @@ export default {
 					} catch (verifyError) {
 						// Silently ignore verification errors
 					}
-					
+
 					// Don't log individual file uploads to reduce log noise (especially for many segment files)
 					// Summary is logged at the end with total file count
 				} catch (uploadError) {
@@ -648,12 +648,12 @@ export default {
 			if (fileSize === 0) {
 				throw new Error(`Playlist file is empty: ${playlistPath}`);
 			}
-			
+
 			let content = fs.readFileSync(playlistPath, 'utf-8');
 			if (!content || content.trim().length === 0) {
 				throw new Error(`Playlist file content is empty: ${playlistPath}`);
 			}
-			
+
 			const lines = content.split('\n');
 			const newLines: string[] = [];
 
@@ -668,7 +668,7 @@ export default {
 					if (uriMatch && uriMatch[1]) {
 						const originalKeyURI = uriMatch[1];
 						const keyBasename = path.basename(originalKeyURI);
-						
+
 						// Only replace if it's a relative path (not a full URL from keyBaseUrl)
 						// and we're using file IDs
 						if (!useFilenameDisk && !originalKeyURI.includes('://')) {
@@ -691,18 +691,18 @@ export default {
 					}
 					// Ensure filename is trimmed (remove any trailing whitespace)
 					filename = filename.trim();
-					
+
 					// If the line is already a UUID (file ID) and we're using file IDs, keep it as-is
 					if (uuidPattern.test(filename) && !useFilenameDisk) {
 						newLines.push(filename);
 						continue;
 					}
-					
+
 					// Also try with just the basename in case path is included
 					const basename = path.basename(filename);
 					// Try multiple lookup strategies: exact match, basename match, and trimmed versions
 					const fileId = fileIdMap[filename] || fileIdMap[basename] || fileIdMap[filename.trim()] || fileIdMap[basename.trim()];
-					
+
 					if (fileId) {
 						if (useFilenameDisk) {
 							// Use filename_disk (the original filename) - only when explicitly requested
@@ -785,7 +785,7 @@ export default {
 						reject(new Error(errorMsg));
 						return;
 					}
-					
+
 					const playlistSize = fs.statSync(expectedPlaylistPath).size;
 					if (playlistSize === 0) {
 						const errorMsg = `Playlist file is empty: ${expectedPlaylistPath}`;
@@ -796,7 +796,7 @@ export default {
 						reject(new Error(errorMsg));
 						return;
 					}
-					
+
 					// Verify playlist has valid content (at least contains #EXTM3U)
 					const playlistContent = fs.readFileSync(expectedPlaylistPath, 'utf-8');
 					if (!playlistContent.includes('#EXTM3U')) {
@@ -815,16 +815,16 @@ export default {
 			})
 		}
 
-				const extractAudio = async (inputFile: string, outputPath: string, forceMono: boolean, niceValue?: number): Promise<string> => {
+		const extractAudio = async (inputFile: string, outputPath: string, forceMono: boolean, niceValue?: number): Promise<string> => {
 			return new Promise((resolve, reject) => {
 				logger.info(`[transcode-video-operation] (${filename}) Extracting audio track to: ${outputPath} (Force mono: ${forceMono})`);
-				
+
 				const isWindows = process.platform === 'win32';
 				const nicePrefix = (!isWindows && niceValue !== undefined && niceValue !== null) ? `nice -n ${niceValue} ` : '';
-				
+
 				const audioParams = forceMono ? '-ac 1 -ar 16000' : '';
 				const command = `${nicePrefix}ffmpeg -y -i ${inputFile} -vn -acodec libmp3lame ${audioParams} -q:a 4 ${outputPath}`;
-				
+
 				exec(command, (error, stdout, stderr) => {
 					if (error) {
 						logger.error(`[transcode-video-operation] (${filename}) Error extracting audio track:`, error);
@@ -834,12 +834,12 @@ export default {
 						reject(error);
 						return;
 					}
-					
+
 					if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size === 0) {
 						reject(new Error("Extracted audio file is missing or empty"));
 						return;
 					}
-					
+
 					logger.info(`[transcode-video-operation] (${filename}) Audio track extracted successfully`);
 					resolve(outputPath);
 				});
@@ -850,7 +850,7 @@ export default {
 			const apiEndpoint = caption_endpoint || (env.TRANSCRIBE_API_ENDPOINT as string);
 			const apiKey = caption_api_key || (env.TRANSCRIBE_API_KEY as string);
 			let apiType = caption_api_type === 'env' ? (env.TRANSCRIBE_API_TYPE as string) : caption_api_type;
-			
+
 			if (!apiType || apiType === 'env') {
 				apiType = 'openai';
 			}
@@ -902,7 +902,7 @@ export default {
 			return vttResult;
 		};
 
-				const convertAzureJsonToSrt = (jsonData: any, speakerMap: any): string => {
+		const convertAzureJsonToSrt = (jsonData: any, speakerMap: any): string => {
 			let srt = "";
 			let index = 1;
 			const phrases = jsonData.recognizedPhrases || [];
@@ -947,7 +947,7 @@ export default {
 				const words = text.split(' ');
 				const lines: string[] = [];
 				let currentLine = '';
-				
+
 				for (const word of words) {
 					if (!word) continue;
 					if (currentLine.length + word.length + 1 <= maxLen) {
@@ -997,10 +997,10 @@ export default {
 
 			return srt;
 		};
-	
+
 		/* Start of the script */
 		logger.info(`[transcode-video-operation] (${filename}) Operation started`);
-		
+
 		// Ensure threads is a number (may come as string from form input)
 		// 0 means use all available cores, 1+ means use that many threads
 		const threadCount = threads !== undefined && threads !== null ? parseInt(String(threads), 10) : 1;
@@ -1036,11 +1036,11 @@ export default {
 					error: `No storage found for location <${fileObject.storage}>`
 				}
 			}
-			
+
 			// Construct file path - use process.env.PWD or fallback to /directus
 			const basePath = process.env.PWD || '/directus';
 			filePath = path.join(basePath, `${storagePath}/${fileObject.filename_disk}`);
-			
+
 			// Verify source file exists
 			if (!fs.existsSync(filePath)) {
 				logger.error(`[transcode-video-operation] (${filename}) Source file not found: %s`, filePath);
@@ -1061,7 +1061,7 @@ export default {
 				} else if ((fileObject as any).data?.id) {
 					fileId = String((fileObject as any).data.id);
 				}
-				
+
 				if (!fileId) {
 					logger.error(`[transcode-video-operation] (${filename}) Cannot download source file: file ID not found. fileObject keys: ${Object.keys(fileObject).join(', ')}`);
 					return {
@@ -1100,18 +1100,18 @@ export default {
 				tempSourceFile = tempFilePath;
 
 				// baseUrl is resolved at the top of the handler
-				
+
 				if (!fileId || typeof fileId !== 'string' || fileId.trim() === '') {
 					logger.error(`[transcode-video-operation] (${filename}) Invalid fileId: ${fileId}`);
 					return {
 						error: `Invalid file ID: ${fileId}`
 					};
 				}
-				
+
 				const assetUrl = `${baseUrl}/assets/${fileId}`;
-				
+
 				logger.info(`[transcode-video-operation] (${filename}) Source file is in cloud storage (${sourceStorageDriver}), downloading to temporary location...`);
-				
+
 				await new Promise<void>((resolve, reject) => {
 					// Validate URL before making request
 					try {
@@ -1120,7 +1120,7 @@ export default {
 						reject(new Error(`Invalid asset URL: ${assetUrl}. Error: ${urlError instanceof Error ? urlError.message : String(urlError)}`));
 						return;
 					}
-					
+
 					const protocol = assetUrl.startsWith('https') ? https : http;
 					const request = protocol.get(assetUrl, (response) => {
 						if (response.statusCode !== 200) {
@@ -1153,7 +1153,7 @@ export default {
 				};
 			}
 		}
-		
+
 		// Determine output directory based on target storage adapter
 		// For local storage: files must be in the target storage location
 		// For cloud storage: can use temp directory, files will be uploaded
@@ -1178,7 +1178,7 @@ export default {
 				}
 			}
 			// If no relative path, just use the target storage root
-			outputDir = relativePath 
+			outputDir = relativePath
 				? path.join(basePath, targetStoragePath, relativePath)
 				: path.join(basePath, targetStoragePath);
 			logger.info(`[transcode-video-operation] (${filename}) Target storage is local (${targetStorageAdapter}), output directory: ${outputDir}`);
@@ -1187,16 +1187,16 @@ export default {
 			outputDir = path.dirname(filePath);
 			logger.info(`[transcode-video-operation] (${filename}) Target storage is cloud (${targetStorageAdapter}), output directory: ${outputDir}`);
 		}
-		
+
 		logger.info(`[transcode-video-operation] (${filename}) File to be transcoded: %s`, filePath)
 		logger.info(`[transcode-video-operation] (${filename}) Output directory: %s`, outputDir)
-		
+
 		// Ensure the output directory exists
 		if (!fs.existsSync(outputDir)) {
-			fs.mkdirSync(outputDir, {recursive: true});
+			fs.mkdirSync(outputDir, { recursive: true });
 			logger.info(`[transcode-video-operation] (${filename}) Folder created`)
 		}
-		
+
 		// Check if ffmpeg is available before starting any transcoding
 		try {
 			await checkFFmpegAvailable();
@@ -1215,7 +1215,7 @@ export default {
 			// If we can't get metadata, allow all qualities (fallback behavior)
 			return { width: 99999, height: 99999, isVertical: false, duration: 0 };
 		});
-		
+
 		const metadata = sourceMetadata;
 		const sourceHeight = sourceMetadata.height;
 		logger.info(`[transcode-video-operation] (${filename}) Source metadata: width=${sourceMetadata.width}, height=${sourceHeight}, duration=${sourceMetadata.duration}`);
@@ -1230,7 +1230,7 @@ export default {
 		let keyInfoPath: string | undefined = undefined;
 		const keyFilename = `${filename}.key`;
 		const keyFileLocalPath = path.join(outputDir, keyFilename);
-		
+
 		let masterId: string | null = null;
 		let thumbnailId: string | null = null;
 		const fileIdMap: Record<string, string> = {};
@@ -1253,7 +1253,7 @@ export default {
 
 			// Determine keyURI for the manifest
 			const keyURI = keyBaseUrl ? `${keyBaseUrl.endsWith('/') ? keyBaseUrl.slice(0, -1) : keyBaseUrl}/${keyFilename}` : keyFilename;
-			
+
 			// Create temporary .keyinfo file
 			keyInfoPath = path.join(os.tmpdir(), `${filename}_${crypto.randomBytes(4).toString('hex')}.keyinfo`);
 			const keyInfoContent = `${keyURI}\n${keyFileLocalPath}`;
@@ -1263,23 +1263,23 @@ export default {
 
 			// Check if input is 10-bit by examining the video stream
 			const isHighBitDepth = await new Promise<boolean>((resolve, reject) => {
-					exec(`ffprobe -v error -select_streams v:0 -show_entries stream=pix_fmt -of json ${filePath}`, 
-						(error, stdout) => {
-							if (error) {
-								logger.warn(`[transcode-video-operation] (${filename}) Error checking bit depth, assuming 8-bit: %s`, error.message);
-								resolve(false); // Default to false if check fails
-								return;
-							}
-							try {
-								const data = JSON.parse(stdout);
-								const pixFmt = data.streams?.[0]?.pix_fmt;
-								// Check if pixel format indicates 10-bit (e.g., yuv420p10le)
-								resolve(pixFmt?.includes('10') || false);
-							} catch (parseError) {
-								logger.warn(`[transcode-video-operation] (${filename}) Error parsing bit depth check, assuming 8-bit`);
-								resolve(false);
-							}
-						});
+				exec(`ffprobe -v error -select_streams v:0 -show_entries stream=pix_fmt -of json ${filePath}`,
+					(error, stdout) => {
+						if (error) {
+							logger.warn(`[transcode-video-operation] (${filename}) Error checking bit depth, assuming 8-bit: %s`, error.message);
+							resolve(false); // Default to false if check fails
+							return;
+						}
+						try {
+							const data = JSON.parse(stdout);
+							const pixFmt = data.streams?.[0]?.pix_fmt;
+							// Check if pixel format indicates 10-bit (e.g., yuv420p10le)
+							resolve(pixFmt?.includes('10') || false);
+						} catch (parseError) {
+							logger.warn(`[transcode-video-operation] (${filename}) Error parsing bit depth check, assuming 8-bit`);
+							resolve(false);
+						}
+					});
 			});
 
 			if (isHighBitDepth) {
@@ -1288,7 +1288,7 @@ export default {
 
 			// Get optimized quality options with encryption
 			const allQualitiesRaw = getQualityOptionsRaw(isHighBitDepth, keyInfoPath);
-			
+
 			// Filter qualities based on user selection (default: all)
 			// Handle cases where qualities might be undefined, null, or not an array
 			// Tags interface returns strings with "p" suffix (e.g., "240p"), so default is also strings with "p"
@@ -1305,7 +1305,7 @@ export default {
 					}
 				}
 			}
-			
+
 			// Convert to numbers (tags interface returns strings)
 			// Strip "p" suffix if present (e.g., "240p" -> 240)
 			const selectedQualitiesNumbers = selectedQualities
@@ -1318,7 +1318,7 @@ export default {
 					return q;
 				})
 				.filter(q => !isNaN(q));
-			
+
 			// Map quality IDs to their target heights
 			const qualityHeights: Record<number, number> = {
 				240: 240,
@@ -1327,10 +1327,10 @@ export default {
 				1080: 1080,
 				2160: 2160
 			};
-			
+
 			// Filter qualities: first by user selection, then by source resolution (prevent upscaling)
 			qualitiesRaw = allQualitiesRaw.filter(quality => selectedQualitiesNumbers.includes(quality.id));
-			
+
 			// Filter out qualities that would require upscaling
 			const qualitiesBeforeFilter = qualitiesRaw.length;
 			qualitiesRaw = qualitiesRaw.filter(quality => {
@@ -1341,27 +1341,27 @@ export default {
 				}
 				return true;
 			});
-			
+
 			if (qualitiesBeforeFilter > qualitiesRaw.length) {
 				logger.info(`[transcode-video-operation] (${filename}) Filtered out ${qualitiesBeforeFilter - qualitiesRaw.length} quality level(s) that would require upscaling`);
 			}
-			
+
 			logger.info(`[transcode-video-operation] (${filename}) Selected qualities: ${selectedQualitiesNumbers.join(', ')}`);
 			logger.info(`[transcode-video-operation] (${filename}) Will transcode ${qualitiesRaw.length} quality levels`);
-			
+
 			if (qualitiesRaw.length === 0) {
 				return {
 					error: 'No quality levels selected for transcoding'
 				};
 			}
-			
+
 			// Check if transcoded files already exist
 			const existingFiles = readFiles(outputDir);
 			const hasFiles = existingFiles.some(file => file.includes('_240p') || file.includes('_480p') || file.includes('_720p') || file.includes('_1080p') || file.includes('_2160p'));
-			
+
 			if (!hasFiles) {
 				logger.info(`[transcode-video-operation] (${filename}) No existing files found, starting transcoding...`);
-				
+
 				try {
 					// Process qualities sequentially to catch errors on the first quality level
 					for (const quality of qualitiesRaw) {
@@ -1388,7 +1388,7 @@ export default {
 				}
 			} else {
 				logger.info(`[transcode-video-operation] (${filename}) Transcoded files already exist, skipping transcoding`);
-				
+
 				// Even if skipping transcoding, we should clean up the keyinfo file we just created
 				if (keyInfoPath && fs.existsSync(keyInfoPath)) {
 					try {
@@ -1402,7 +1402,7 @@ export default {
 
 			// Generate master playlist dynamically based on available quality files
 			const m3u8Content: string[] = ['#EXTM3U', '#EXT-X-VERSION:3'];
-			
+
 			// Add available quality streams (only if the file exists and has content)
 			for (const quality of qualitiesRaw) {
 				const qualityFile = `${outputDir}/${filename}_${quality.id}p.m3u8`;
@@ -1437,7 +1437,7 @@ export default {
 
 			const masterPlaylistPath = `${outputDir}/${filename}_master.m3u8`;
 			fs.writeFileSync(masterPlaylistPath, m3u8Content.join('\n'));
-			
+
 			// Verify master playlist was created successfully
 			if (!fs.existsSync(masterPlaylistPath) || fs.statSync(masterPlaylistPath).size === 0) {
 				logger.error(`[transcode-video-operation] (${filename}) Failed to create master playlist: ${masterPlaylistPath}`);
@@ -1445,7 +1445,7 @@ export default {
 					error: `Failed to create master playlist: ${masterPlaylistPath}`
 				};
 			}
-			
+
 			logger.info(`[transcode-video-operation] (${filename}) Master playlist created: ${filename}_master.m3u8`);
 
 			// Check if thumbnail already exists in Directus before extracting
@@ -1602,7 +1602,7 @@ export default {
 			const useFilenameDisk = playlist_reference_type === 'filename_disk';
 			const referenceTypeLabel = useFilenameDisk ? 'filename_disk' : 'file IDs';
 			logger.info(`[transcode-video-operation] (${filename}) Rebuilding playlists with ${referenceTypeLabel}...`);
-			
+
 			// Rebuild quality playlists with UUIDs and upload them
 			for (const quality of qualitiesRaw) {
 				const qualityPlaylistPath = `${outputDir}/${filename}_${quality.id}p.m3u8`;
@@ -1613,7 +1613,7 @@ export default {
 						logger.warn(`[transcode-video-operation] (${filename}) Playlist file ${quality.id}p.m3u8 is empty, skipping rebuild`);
 						continue;
 					}
-					
+
 					// Rebuild playlist: replace filenames with UUIDs from fileIdMap
 					const rebuiltContent = rebuildPlaylist(qualityPlaylistPath, fileIdMap, useFilenameDisk, logger);
 					if (!rebuiltContent || rebuiltContent.trim().length === 0) {
@@ -1621,10 +1621,10 @@ export default {
 						logger.warn(`[transcode-video-operation] (${filename}) Rebuilt playlist content is empty for ${quality.id}p, skipping ${playlistAction}`);
 						continue;
 					}
-					
+
 					// Write rebuilt playlist to disk
 					fs.writeFileSync(qualityPlaylistPath, rebuiltContent);
-					
+
 					// Upload the rebuilt playlist (first time - not a re-upload)
 					try {
 						const playlistBasename = path.basename(qualityPlaylistPath);
@@ -1645,7 +1645,7 @@ export default {
 					error: `Master playlist file does not exist: ${masterPlaylistPath}`
 				};
 			}
-			
+
 			const masterFileSize = fs.statSync(masterPlaylistPath).size;
 			if (masterFileSize === 0) {
 				logger.error(`[transcode-video-operation] (${filename}) Master playlist file is empty: ${masterPlaylistPath}`);
@@ -1653,7 +1653,7 @@ export default {
 					error: `Master playlist file is empty: ${masterPlaylistPath}`
 				};
 			}
-			
+
 			const masterContent = fs.readFileSync(masterPlaylistPath, 'utf-8');
 			if (!masterContent || masterContent.trim().length === 0) {
 				logger.error(`[transcode-video-operation] (${filename}) Master playlist content is empty: ${masterPlaylistPath}`);
@@ -1661,7 +1661,7 @@ export default {
 					error: `Master playlist content is empty: ${masterPlaylistPath}`
 				};
 			}
-			
+
 			const masterLines = masterContent.split('\n');
 			const newMasterLines: string[] = [];
 
@@ -1678,13 +1678,13 @@ export default {
 					if (playlistFilename.startsWith('/assets/')) {
 						playlistFilename = playlistFilename.substring('/assets/'.length);
 					}
-					
+
 					// If the line is already a UUID (file ID) and we're using file IDs, keep it as-is
 					if (uuidPattern.test(playlistFilename) && !useFilenameDisk) {
 						newMasterLines.push(playlistFilename);
 						continue;
 					}
-					
+
 					// Also try with just the basename
 					const basename = path.basename(playlistFilename);
 					const playlistId = fileIdMap[playlistFilename] || fileIdMap[basename];
@@ -1704,7 +1704,7 @@ export default {
 			}
 
 			fs.writeFileSync(masterPlaylistPath, newMasterLines.join('\n'));
-			
+
 			// Register/upload master playlist
 			try {
 				masterId = await uploadFileToDirectus(masterPlaylistPath, targetFolderId);
@@ -1740,7 +1740,7 @@ export default {
 					fs.mkdirSync(tempDir, { recursive: true, mode: 0o755 });
 				}
 				tempAudioPath = path.join(tempDir, `${filename}_temp_audio.mp3`);
-				
+
 				let forceMono = false;
 				if (process_mode === 'audio_only') {
 					forceMono = true;
@@ -1763,22 +1763,22 @@ export default {
 		if (process_mode === 'all' && generate_captions && tempAudioPath && fs.existsSync(tempAudioPath)) {
 			try {
 				logger.info(`[transcode-video-operation] (${filename}) Initiating AI subtitle generation...`);
-				
+
 				// 2. Transcribe audio to WebVTT subtitle
 				const vttContent = await transcribeAudio(tempAudioPath);
-				
+
 				// 3. Save WebVTT file to target outputDir
 				const subtitleFilename = `${filename}_subtitle.vtt`;
 				const subtitleLocalPath = path.join(outputDir, subtitleFilename);
 				fs.writeFileSync(subtitleLocalPath, vttContent);
 				logger.info(`[transcode-video-operation] (${filename}) Subtitle file saved locally: ${subtitleLocalPath}`);
-				
+
 				// 4. Upload WebVTT file to Directus
 				logger.info(`[transcode-video-operation] (${filename}) Uploading subtitle file to Directus folder...`);
 				subtitleId = await uploadFileToDirectus(subtitleLocalPath, targetFolderId, {
 					mimetype: 'text/vtt'
 				});
-				
+
 				if (subtitleId) {
 					fileIdMap[subtitleFilename] = subtitleId;
 					uploadedFiles.push({ filename_disk: subtitleFilename, id: subtitleId });
@@ -1793,7 +1793,7 @@ export default {
 		const shouldRunSpeech2Text = (process_mode === 'transcription_only') || (process_mode === 'all' && generate_speech2text);
 
 		if (tempAudioPath && fs.existsSync(tempAudioPath)) {
-			const shouldSaveAudioPermanently = (process_mode === 'audio_only') || 
+			const shouldSaveAudioPermanently = (process_mode === 'audio_only') ||
 				(process_mode === 'all' && generate_speech2text) ||
 				(process_mode === 'transcription_only' && !isAudioInput);
 
@@ -1801,19 +1801,19 @@ export default {
 				try {
 					const audioFilename = `${filename}_audio.mp3`;
 					const permanentAudioPath = path.join(outputDir, audioFilename);
-					
+
 					// Copy/move temporary audio to outputDir
 					if (tempAudioPath !== permanentAudioPath) {
 						fs.copyFileSync(tempAudioPath, permanentAudioPath);
 					}
 					logger.info(`[transcode-video-operation] (${filename}) Permanent audio file saved locally: ${permanentAudioPath}`);
-					
+
 					// Upload audio to Directus
 					logger.info(`[transcode-video-operation] (${filename}) Uploading permanent audio to Directus folder...`);
 					audioId = await uploadFileToDirectus(permanentAudioPath, targetFolderId, {
 						mimetype: 'audio/mpeg'
 					});
-					
+
 					if (audioId) {
 						fileIdMap[audioFilename] = audioId;
 						uploadedFiles.push({ filename_disk: audioFilename, id: audioId });
@@ -1848,15 +1848,15 @@ export default {
 			let subscriptionKey: string | null = null;
 			try {
 				logger.info(`[transcode-video-operation] (${filename}) Initiating AI Speech2Text flow...`);
-				
+
 				// Submit Speech2Text job to Azure
 				const speech2textUrl = speech2text_endpoint || 'https://swedencentral.api.cognitive.microsoft.com/speechtotext/v3.2/transcriptions';
 				subscriptionKey = speech2text_subscription_key || (env.SPEECH2TEXT_SUBSCRIPTION_KEY as string);
-				
+
 				if (!subscriptionKey) {
 					throw new Error("Azure Speech2Text subscription key is not configured.");
 				}
-				
+
 				const audioUrl = speech2text_access_token
 					? `${baseUrl}/assets/${audioId}.mp3?access_token=${speech2text_access_token}`
 					: `${baseUrl}/assets/${audioId}.mp3`;
@@ -1876,9 +1876,9 @@ export default {
 						]
 					}
 				};
-				
+
 				logger.info(`[transcode-video-operation] (${filename}) Submitting Speech2Text job to Azure Speech Services: ${speech2textUrl}`);
-				
+
 				const postResponse = await fetch(speech2textUrl, {
 					method: 'POST',
 					headers: {
@@ -1887,26 +1887,26 @@ export default {
 					},
 					body: JSON.stringify(s2tPayload)
 				});
-				
+
 				if (!postResponse.ok) {
 					const errText = await postResponse.text();
 					throw new Error(`Speech2Text job submission failed (HTTP ${postResponse.status}): ${errText}`);
 				}
-				
+
 				const jobData = await postResponse.json() as any;
 				jobSelfUrl = jobData.self;
 				const jobFilesUrl = jobData.links?.files;
-				
+
 				if (!jobSelfUrl) {
 					throw new Error("Speech2Text response missing job self URL");
 				}
-				
+
 				logger.info(`[transcode-video-operation] (${filename}) Speech2Text job submitted. Self URL: ${jobSelfUrl}`);
-				
+
 				// Poll status until Succeeded or Failed
 				let status = jobData.status || 'NotStarted';
-				const pollIntervalMs = 5000;
-				
+				const pollIntervalMs = 30000;
+
 				let timeoutSeconds = 1800; // default 30 minutes (1800 seconds)
 				if (speech2text_timeout !== undefined && speech2text_timeout !== null) {
 					const parsed = parseInt(String(speech2text_timeout), 10);
@@ -1916,79 +1916,79 @@ export default {
 				}
 				const maxPollTimeMs = timeoutSeconds * 1000;
 				logger.info(`[transcode-video-operation] (${filename}) Polling transcription job with a timeout of ${timeoutSeconds} seconds (${Math.round(timeoutSeconds / 60)} minutes)`);
-				
+
 				let elapsedMs = 0;
 				let lastPollData = jobData;
-				
+
 				while (status !== 'Succeeded' && status !== 'Failed') {
 					if (elapsedMs >= maxPollTimeMs) {
 						throw new Error(`Speech2Text job timed out after ${maxPollTimeMs / 1000} seconds`);
 					}
-					
+
 					await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
 					elapsedMs += pollIntervalMs;
-					
+
 					const pollResponse = await fetch(jobSelfUrl, {
 						headers: {
 							'Ocp-Apim-Subscription-Key': subscriptionKey
 						}
 					});
-					
+
 					if (!pollResponse.ok) {
 						logger.warn(`[transcode-video-operation] (${filename}) Failed to poll Speech2Text job status (HTTP ${pollResponse.status})`);
 						continue;
 					}
-					
+
 					const pollData = await pollResponse.json() as any;
 					lastPollData = pollData;
 					status = pollData.status;
 					logger.info(`[transcode-video-operation] (${filename}) Polling Speech2Text job status... Status: ${status}`);
 				}
-				
+
 				if (status === 'Failed') {
 					const azureError = lastPollData?.properties?.error;
 					const azureErrorCode = azureError?.code || 'Unknown';
 					const azureErrorMessage = azureError?.message || 'No detailed error message';
 					throw new Error(`Speech2Text job failed on Azure Speech Services. Code: ${azureErrorCode}, Message: ${azureErrorMessage}`);
 				}
-				
+
 				// Get files from files endpoint
 				const filesUrl = jobFilesUrl || `${jobSelfUrl}/files`;
 				logger.info(`[transcode-video-operation] (${filename}) Fetching Speech2Text job files list from ${filesUrl}`);
-				
+
 				const filesResponse = await fetch(filesUrl, {
 					headers: {
 						'Ocp-Apim-Subscription-Key': subscriptionKey
 					}
 				});
-				
+
 				if (!filesResponse.ok) {
 					throw new Error(`Failed to fetch Speech2Text files (HTTP ${filesResponse.status})`);
 				}
-				
+
 				const filesData = await filesResponse.json() as any;
 				const filesList = filesData.values || [];
 				const transcriptionFile = filesList.find((f: any) => f.name === 'contenturl_0.json' || f.kind === 'Transcription');
-				
+
 				if (!transcriptionFile || !transcriptionFile.links?.contentUrl) {
 					throw new Error("Could not find transcription contenturl_0.json file in job files list");
 				}
-				
+
 				const contentUrl = transcriptionFile.links.contentUrl;
 				logger.info(`[transcode-video-operation] (${filename}) Downloading transcription JSON from SAS URL: ${contentUrl}`);
-				
+
 				// Download transcription JSON content
 				const contentResponse = await fetch(contentUrl);
 				if (!contentResponse.ok) {
 					throw new Error(`Failed to download transcription JSON from SAS URL (HTTP ${contentResponse.status})`);
 				}
-				
+
 				const transcriptionJson = await contentResponse.json() as any;
-				
+
 				// Convert to SRT
 				logger.info(`[transcode-video-operation] (${filename}) Converting transcription JSON to SRT format...`);
 				const srtContent = convertAzureJsonToSrt(transcriptionJson, speech2text_speaker_map);
-				
+
 				// Save raw JSON transcription permanently to target outputDir
 				const s2tJsonFilename = `${filename}_s2t_transcription.json`;
 				const s2tJsonLocalPath = path.join(outputDir, s2tJsonFilename);
@@ -2012,13 +2012,13 @@ export default {
 				const s2tSubtitleLocalPath = path.join(outputDir, s2tSubtitleFilename);
 				fs.writeFileSync(s2tSubtitleLocalPath, srtContent);
 				logger.info(`[transcode-video-operation] (${filename}) Speech2Text subtitle saved locally: ${s2tSubtitleLocalPath}`);
-				
+
 				// Upload SRT to Directus
 				logger.info(`[transcode-video-operation] (${filename}) Uploading Speech2Text subtitle file to Directus folder...`);
 				s2tSubtitleId = await uploadFileToDirectus(s2tSubtitleLocalPath, targetFolderId, {
 					mimetype: 'application/x-subrip'
 				});
-				
+
 				if (s2tSubtitleId) {
 					fileIdMap[s2tSubtitleFilename] = s2tSubtitleId;
 					uploadedFiles.push({ filename_disk: s2tSubtitleFilename, id: s2tSubtitleId });
@@ -2045,7 +2045,7 @@ export default {
 				}
 			}
 		}
-		
+
 		const filesAction = targetStorageDriver === 'local' ? 'registered' : 'uploaded';
 		logger.info(`[transcode-video-operation] (${filename}) All files ${filesAction} to Directus: ${uploadedFiles.length} files total`);
 
