@@ -66,6 +66,7 @@ interface OperationInput {
 	speech2text_access_token?: string;
 	speech2text_speaker_map?: any;
 	speech2text_timeout?: number | string;
+	speech2text_poll_interval?: number | string;
 }
 
 interface QualityOption {
@@ -140,7 +141,8 @@ export default {
 			speech2text_diarization = true,
 			speech2text_access_token,
 			speech2text_speaker_map,
-			speech2text_timeout
+			speech2text_timeout,
+			speech2text_poll_interval
 		}: OperationInput,
 		{ env, services, getSchema, logger }: OperationContext
 	): Promise<OperationResult | { error: string }> => {
@@ -369,7 +371,7 @@ export default {
 		// Extract thumbnail at 1 second
 		const extractThumbnail = async (inputFile: string, outputPath: string): Promise<string> => {
 			return new Promise((resolve, reject) => {
-				exec(`ffmpeg -y -i ${inputFile} -ss 1 -vframes 1 -q:v 2 ${outputPath}`, (error, stdout, stderr) => {
+				exec(`ffmpeg -loglevel warning -y -i ${inputFile} -ss 1 -vframes 1 -q:v 2 ${outputPath}`, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
 					if (error) {
 						logger.error(`[transcode-video-operation] (${filename}) Error extracting thumbnail:`, error);
 						if (stderr) {
@@ -755,8 +757,8 @@ export default {
 				if (isWindows && niceValue !== undefined && niceValue !== null) {
 					logger.warn(`[transcode-video-operation] (${filename}) Nice value (${niceValue}) specified but running on Windows - nice command not available, ignoring priority setting`);
 				}
-				const command = `${nicePrefix}ffmpeg -y -i ${inputFile} -threads ${validatedThreads} ${quality.options}`;
-				exec(command, (error, stdout, stderr) => {
+				const command = `${nicePrefix}ffmpeg -loglevel warning -y -i ${inputFile} -threads ${validatedThreads} ${quality.options}`;
+				exec(command, { maxBuffer: 1024 * 1024 * 100 }, (error, stdout, stderr) => {
 					if (error) {
 						logger.error(`[transcode-video-operation] (${filename}) Error occured for quality: %s`, quality.id);
 						logger.error(error.message);
@@ -823,9 +825,9 @@ export default {
 				const nicePrefix = (!isWindows && niceValue !== undefined && niceValue !== null) ? `nice -n ${niceValue} ` : '';
 
 				const audioParams = forceMono ? '-ac 1 -ar 16000' : '';
-				const command = `${nicePrefix}ffmpeg -y -i ${inputFile} -vn -acodec libmp3lame ${audioParams} -q:a 4 ${outputPath}`;
+				const command = `${nicePrefix}ffmpeg -loglevel warning -y -i ${inputFile} -vn -acodec libmp3lame ${audioParams} -q:a 4 ${outputPath}`;
 
-				exec(command, (error, stdout, stderr) => {
+				exec(command, { maxBuffer: 1024 * 1024 * 100 }, (error, stdout, stderr) => {
 					if (error) {
 						logger.error(`[transcode-video-operation] (${filename}) Error extracting audio track:`, error);
 						if (stderr) {
@@ -1905,7 +1907,15 @@ export default {
 
 				// Poll status until Succeeded or Failed
 				let status = jobData.status || 'NotStarted';
-				const pollIntervalMs = 30000;
+				
+				let pollIntervalSeconds = 30; // default 30 seconds
+				if (speech2text_poll_interval !== undefined && speech2text_poll_interval !== null) {
+					const parsed = parseInt(String(speech2text_poll_interval), 10);
+					if (!isNaN(parsed) && parsed > 0) {
+						pollIntervalSeconds = parsed;
+					}
+				}
+				const pollIntervalMs = pollIntervalSeconds * 1000;
 
 				let timeoutSeconds = 1800; // default 30 minutes (1800 seconds)
 				if (speech2text_timeout !== undefined && speech2text_timeout !== null) {

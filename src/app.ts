@@ -856,6 +856,54 @@ export default {
 				default_value: 1800,
 				required: false
 			}
+		},
+		{
+			field: 'speech2text_poll_interval',
+			name: 'Speech2Text Poll Interval (Seconds)',
+			type: 'integer',
+			meta: {
+				width: 'half',
+				interface: 'input',
+				options: {
+					placeholder: '30',
+					min: 5,
+					step: 5
+				},
+				note: 'How often to check the transcription status with Azure, in seconds. Default: 30 seconds.',
+				conditions: [
+					{
+						name: 'Hide speech2text settings',
+						rule: {
+							_or: [
+								{
+									process_mode: {
+										_in: ['hls_only', 'audio_only']
+									}
+								},
+								{
+									_and: [
+										{
+											process_mode: {
+												_eq: 'all'
+											}
+										},
+										{
+											generate_speech2text: {
+												_eq: false
+											}
+										}
+									]
+								}
+							]
+						},
+						hidden: true
+					}
+				]
+			},
+			schema: {
+				default_value: 30,
+				required: false
+			}
 		}
 	],
 };
