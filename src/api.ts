@@ -282,8 +282,8 @@ export default {
 			// Always use main profile for maximum compatibility
 			const profile = 'main';
 
-			// Add pixel format conversion for high bit depth videos
-			const pixelFormat = isHighBitDepth ? 'format=yuv420p,' : '';
+			// Force output pixel format to yuv420p to guarantee compatibility with iOS/AVPlayer
+			const pixelFormat = 'format=yuv420p,';
 
 			// Add encryption options if keyInfoPath is provided
 			const encryptionOptions = keyInfoPath ? `-hls_key_info_file ${keyInfoPath}` : '';
