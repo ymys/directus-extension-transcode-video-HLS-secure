@@ -1357,9 +1357,11 @@ export default {
 				};
 			}
 
-			// Check if transcoded files already exist
-			const existingFiles = readFiles(outputDir);
-			const hasFiles = existingFiles.some(file => file.includes('_240p') || file.includes('_480p') || file.includes('_720p') || file.includes('_1080p') || file.includes('_2160p'));
+			// Check if all expected quality playlists already exist and are not empty
+			const hasFiles = qualitiesRaw.every(quality => {
+				const qualityFile = `${outputDir}/${filename}_${quality.id}p.m3u8`;
+				return fs.existsSync(qualityFile) && fs.statSync(qualityFile).size > 0;
+			});
 
 			if (!hasFiles) {
 				logger.info(`[transcode-video-operation] (${filename}) No existing files found, starting transcoding...`);
