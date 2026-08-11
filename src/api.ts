@@ -17,6 +17,11 @@ declare const process: {
 	platform: string;
 };
 
+function quotePath(filePath: string): string {
+	return `"${filePath.replace(/["\\$`]/g, '\\$&')}"`;
+}
+
+
 interface OperationContext {
 	env: {
 		STORAGE_LOCATIONS?: string | string[];
@@ -181,8 +186,23 @@ export default {
 			throw new Error("Input file missing filename_disk");
 		}
 
-		const filename = fileObject.filename_disk.split(('.'))[0];
-		const extension = fileObject.filename_disk.substr(fileObject.filename_disk.lastIndexOf('.') + 1);
+		const lastDotIndex = fileObject.filename_disk.lastIndexOf('.');
+		let filename: string;
+		let extension: string;
+
+		if (lastDotIndex > 0) {
+			const possibleExt = fileObject.filename_disk.substring(lastDotIndex + 1);
+			if (possibleExt.includes(' ') || possibleExt.includes('/') || possibleExt.length > 10) {
+				filename = fileObject.filename_disk;
+				extension = '';
+			} else {
+				filename = fileObject.filename_disk.substring(0, lastDotIndex);
+				extension = possibleExt;
+			}
+		} else {
+			filename = fileObject.filename_disk;
+			extension = '';
+		}
 
 		// Resolve baseUrl early for both downloading source files and constructing S2T callback URLs
 		const getHostPort = (): string => {
@@ -289,28 +309,28 @@ export default {
 			const colorSpaceFlags = '-pix_fmt yuv420p -colorspace bt709 -color_trc bt709 -color_primaries bt709 -level:v 4.1';
 
 			// Add encryption options if keyInfoPath is provided
-			const encryptionOptions = keyInfoPath ? `-hls_key_info_file ${keyInfoPath}` : '';
+			const encryptionOptions = keyInfoPath ? `-hls_key_info_file ${quotePath(keyInfoPath)}` : '';
 
 			return [
 				{
 					id: 240,
-					options: `-vf "${pixelFormat}scale=w='min(426,iw)':h='min(240,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} ${colorSpaceFlags} -crf 22 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 400k -maxrate 428k -bufsize 600k -b:a 64k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_240p_%03d.ts ${outputDir}/${filename}_240p.m3u8`
+					options: `-vf "${pixelFormat}scale=w='min(426,iw)':h='min(240,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} ${colorSpaceFlags} -crf 22 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 400k -maxrate 428k -bufsize 600k -b:a 64k ${encryptionOptions} -hls_segment_filename ${quotePath(`${outputDir}/${filename}_240p_%03d.ts`)} ${quotePath(`${outputDir}/${filename}_240p.m3u8`)}`
 				},
 				{
 					id: 480,
-					options: `-vf "${pixelFormat}scale=w='min(854,iw)':h='min(480,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} ${colorSpaceFlags} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 1400k -maxrate 1498k -bufsize 2100k -b:a 128k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_480p_%03d.ts ${outputDir}/${filename}_480p.m3u8`
+					options: `-vf "${pixelFormat}scale=w='min(854,iw)':h='min(480,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} ${colorSpaceFlags} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 1400k -maxrate 1498k -bufsize 2100k -b:a 128k ${encryptionOptions} -hls_segment_filename ${quotePath(`${outputDir}/${filename}_480p_%03d.ts`)} ${quotePath(`${outputDir}/${filename}_480p.m3u8`)}`
 				},
 				{
 					id: 720,
-					options: `-vf "${pixelFormat}scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} ${colorSpaceFlags} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 2800k -maxrate 2996k -bufsize 4200k -b:a 128k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_720p_%03d.ts ${outputDir}/${filename}_720p.m3u8`
+					options: `-vf "${pixelFormat}scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} ${colorSpaceFlags} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 2800k -maxrate 2996k -bufsize 4200k -b:a 128k ${encryptionOptions} -hls_segment_filename ${quotePath(`${outputDir}/${filename}_720p_%03d.ts`)} ${quotePath(`${outputDir}/${filename}_720p.m3u8`)}`
 				},
 				{
 					id: 1080,
-					options: `-vf "${pixelFormat}scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} ${colorSpaceFlags} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 5000k -maxrate 5350k -bufsize 7500k -b:a 192k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_1080p_%03d.ts ${outputDir}/${filename}_1080p.m3u8`
+					options: `-vf "${pixelFormat}scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} ${colorSpaceFlags} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 5000k -maxrate 5350k -bufsize 7500k -b:a 192k ${encryptionOptions} -hls_segment_filename ${quotePath(`${outputDir}/${filename}_1080p_%03d.ts`)} ${quotePath(`${outputDir}/${filename}_1080p.m3u8`)}`
 				},
 				{
 					id: 2160,
-					options: `-vf "${pixelFormat}scale=w='min(3840,iw)':h='min(2160,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} ${colorSpaceFlags} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 20000k -maxrate 21400k -bufsize 30000k -b:a 192k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_2160p_%03d.ts ${outputDir}/${filename}_2160p.m3u8`
+					options: `-vf "${pixelFormat}scale=w='min(3840,iw)':h='min(2160,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} ${colorSpaceFlags} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 20000k -maxrate 21400k -bufsize 30000k -b:a 192k ${encryptionOptions} -hls_segment_filename ${quotePath(`${outputDir}/${filename}_2160p_%03d.ts`)} ${quotePath(`${outputDir}/${filename}_2160p.m3u8`)}`
 				}
 			];
 		};
@@ -324,11 +344,11 @@ export default {
 		// Get video/audio metadata (dimensions, duration)
 		const getVideoMetadata = async (inputFile: string): Promise<VideoMetadata> => {
 			return new Promise((resolve, reject) => {
-				exec(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height:format=duration -of json ${inputFile}`,
+				exec(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height:format=duration -of json ${quotePath(inputFile)}`,
 					(error, stdout) => {
 						if (error) {
 							// Try to query just format duration as fallback (for audio inputs)
-							exec(`ffprobe -v error -show_entries format=duration -of json ${inputFile}`, (err2, stdout2) => {
+							exec(`ffprobe -v error -show_entries format=duration -of json ${quotePath(inputFile)}`, (err2, stdout2) => {
 								if (err2) {
 									logger.error(`[transcode-video-operation] (${filename}) Error getting metadata:`, err2);
 									reject(err2);
@@ -374,7 +394,7 @@ export default {
 		// Extract thumbnail at 1 second
 		const extractThumbnail = async (inputFile: string, outputPath: string): Promise<string> => {
 			return new Promise((resolve, reject) => {
-				exec(`ffmpeg -loglevel warning -y -i ${inputFile} -ss 1 -vframes 1 -q:v 2 ${outputPath}`, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
+				exec(`ffmpeg -loglevel warning -y -i ${quotePath(inputFile)} -ss 1 -vframes 1 -q:v 2 ${quotePath(outputPath)}`, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
 					if (error) {
 						logger.error(`[transcode-video-operation] (${filename}) Error extracting thumbnail:`, error);
 						if (stderr) {
@@ -414,7 +434,7 @@ export default {
 		// Get image metadata (dimensions)
 		const getImageMetadata = async (imagePath: string): Promise<ImageMetadata> => {
 			return new Promise((resolve, reject) => {
-				exec(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of json ${imagePath}`,
+				exec(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of json ${quotePath(imagePath)}`,
 					(error, stdout) => {
 						if (error) {
 							logger.error(`[transcode-video-operation] (${filename}) Error getting image metadata:`, error);
@@ -760,7 +780,7 @@ export default {
 				if (isWindows && niceValue !== undefined && niceValue !== null) {
 					logger.warn(`[transcode-video-operation] (${filename}) Nice value (${niceValue}) specified but running on Windows - nice command not available, ignoring priority setting`);
 				}
-				const command = `${nicePrefix}ffmpeg -loglevel warning -y -i ${inputFile} -threads ${validatedThreads} ${quality.options}`;
+				const command = `${nicePrefix}ffmpeg -loglevel warning -y -i ${quotePath(inputFile)} -threads ${validatedThreads} ${quality.options}`;
 				exec(command, { maxBuffer: 1024 * 1024 * 100 }, (error, stdout, stderr) => {
 					if (error) {
 						logger.error(`[transcode-video-operation] (${filename}) Error occured for quality: %s`, quality.id);
@@ -828,7 +848,7 @@ export default {
 				const nicePrefix = (!isWindows && niceValue !== undefined && niceValue !== null) ? `nice -n ${niceValue} ` : '';
 
 				const audioParams = forceMono ? '-ac 1 -ar 16000' : '';
-				const command = `${nicePrefix}ffmpeg -loglevel warning -y -i ${inputFile} -vn -acodec libmp3lame ${audioParams} -q:a 4 ${outputPath}`;
+				const command = `${nicePrefix}ffmpeg -loglevel warning -y -i ${quotePath(inputFile)} -vn -acodec libmp3lame ${audioParams} -q:a 4 ${quotePath(outputPath)}`;
 
 				exec(command, { maxBuffer: 1024 * 1024 * 100 }, (error, stdout, stderr) => {
 					if (error) {
@@ -1268,7 +1288,7 @@ export default {
 
 			// Check if input is 10-bit by examining the video stream
 			const isHighBitDepth = await new Promise<boolean>((resolve, reject) => {
-				exec(`ffprobe -v error -select_streams v:0 -show_entries stream=pix_fmt -of json ${filePath}`,
+				exec(`ffprobe -v error -select_streams v:0 -show_entries stream=pix_fmt -of json ${quotePath(filePath)}`,
 					(error, stdout) => {
 						if (error) {
 							logger.warn(`[transcode-video-operation] (${filename}) Error checking bit depth, assuming 8-bit: %s`, error.message);
