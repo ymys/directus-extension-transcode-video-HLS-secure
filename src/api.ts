@@ -285,29 +285,32 @@ export default {
 			// Force output pixel format to yuv420p to guarantee compatibility with iOS/AVPlayer
 			const pixelFormat = 'format=yuv420p,';
 
+			// Tone-mapping and color space override to force standard BT.709 SDR on iOS (AVPlayer fails on BT.2020 / HDR 10-bit H.264 profiles)
+			const colorSpaceFlags = '-pix_fmt yuv420p -colorspace bt709 -color_trc bt709 -color_primaries bt709 -level:v 4.1';
+
 			// Add encryption options if keyInfoPath is provided
 			const encryptionOptions = keyInfoPath ? `-hls_key_info_file ${keyInfoPath}` : '';
 
 			return [
 				{
 					id: 240,
-					options: `-vf "${pixelFormat}scale=w='min(426,iw)':h='min(240,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 22 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 400k -maxrate 428k -bufsize 600k -b:a 64k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_240p_%03d.ts ${outputDir}/${filename}_240p.m3u8`
+					options: `-vf "${pixelFormat}scale=w='min(426,iw)':h='min(240,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} ${colorSpaceFlags} -crf 22 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 400k -maxrate 428k -bufsize 600k -b:a 64k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_240p_%03d.ts ${outputDir}/${filename}_240p.m3u8`
 				},
 				{
 					id: 480,
-					options: `-vf "${pixelFormat}scale=w='min(854,iw)':h='min(480,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 1400k -maxrate 1498k -bufsize 2100k -b:a 128k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_480p_%03d.ts ${outputDir}/${filename}_480p.m3u8`
+					options: `-vf "${pixelFormat}scale=w='min(854,iw)':h='min(480,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} ${colorSpaceFlags} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 1400k -maxrate 1498k -bufsize 2100k -b:a 128k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_480p_%03d.ts ${outputDir}/${filename}_480p.m3u8`
 				},
 				{
 					id: 720,
-					options: `-vf "${pixelFormat}scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 2800k -maxrate 2996k -bufsize 4200k -b:a 128k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_720p_%03d.ts ${outputDir}/${filename}_720p.m3u8`
+					options: `-vf "${pixelFormat}scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} ${colorSpaceFlags} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 2800k -maxrate 2996k -bufsize 4200k -b:a 128k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_720p_%03d.ts ${outputDir}/${filename}_720p.m3u8`
 				},
 				{
 					id: 1080,
-					options: `-vf "${pixelFormat}scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 5000k -maxrate 5350k -bufsize 7500k -b:a 192k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_1080p_%03d.ts ${outputDir}/${filename}_1080p.m3u8`
+					options: `-vf "${pixelFormat}scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} ${colorSpaceFlags} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 5000k -maxrate 5350k -bufsize 7500k -b:a 192k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_1080p_%03d.ts ${outputDir}/${filename}_1080p.m3u8`
 				},
 				{
 					id: 2160,
-					options: `-vf "${pixelFormat}scale=w='min(3840,iw)':h='min(2160,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 20000k -maxrate 21400k -bufsize 30000k -b:a 192k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_2160p_%03d.ts ${outputDir}/${filename}_2160p.m3u8`
+					options: `-vf "${pixelFormat}scale=w='min(3840,iw)':h='min(2160,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} ${colorSpaceFlags} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 20000k -maxrate 21400k -bufsize 30000k -b:a 192k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_2160p_%03d.ts ${outputDir}/${filename}_2160p.m3u8`
 				}
 			];
 		};
