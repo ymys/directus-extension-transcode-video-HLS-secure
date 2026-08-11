@@ -168,10 +168,11 @@ export default {
 					choices: [
 						{ text: 'Environment Configuration (First One)', value: 'default' },
 						{ text: 'Same as Source File', value: 'source' },
+						{ text: 'Cloudflare R2 Storage (STORAGE_R2)', value: 'r2' },
 						{ text: 'Other', value: 'custom' }
 					]
 				},
-				note: 'Select the storage adapter where transcoded files physically should be stored.'
+				note: 'Select the storage adapter where transcoded HLS files physically should be stored.'
 			},
 			schema: {
 				default_value: 'default'
@@ -185,7 +186,7 @@ export default {
 				width: 'half',
 				interface: 'input',
 				options: {
-					placeholder: 'e.g., local, s3, gcs'
+					placeholder: 'e.g., local, s3, gcs, r2'
 				},
 				note: 'Specify the storage location name (must match one of your configured STORAGE_LOCATIONS)',
 				conditions: [
@@ -205,6 +206,11 @@ export default {
 								},
 								{
 									storage_adapter: {
+										_eq: 'r2'
+									}
+								},
+								{
+									storage_adapter: {
 										_null: true
 									}
 								}
@@ -216,6 +222,91 @@ export default {
 			},
 			schema: {
 				required: false
+			}
+		},
+		{
+			field: 'key_storage_adapter',
+			name: 'Key Storage Location',
+			type: 'string',
+			meta: {
+				width: 'half',
+				interface: 'select-radio',
+				options: {
+					choices: [
+						{ text: 'Save Key in Directus (Local/Default Storage)', value: 'directus' },
+						{ text: 'Same as HLS Target Storage', value: 'target' },
+						{ text: 'Other Custom Location', value: 'custom' }
+					]
+				},
+				note: 'Where the HLS AES-128 encryption key (.key) should be stored. Keeping key in Directus ensures playback remains secured when HLS files are served from Cloudflare R2.'
+			},
+			schema: {
+				default_value: 'directus'
+			}
+		},
+		{
+			field: 'key_target_storage',
+			name: 'Key Custom Storage Location',
+			type: 'text',
+			meta: {
+				width: 'half',
+				interface: 'input',
+				options: {
+					placeholder: 'e.g., local, s3'
+				},
+				note: 'Specify the custom storage location name for the encryption key.',
+				conditions: [
+					{
+						name: 'Hide when key_storage_adapter is not custom',
+						rule: {
+							_or: [
+								{
+									key_storage_adapter: {
+										_eq: 'directus'
+									}
+								},
+								{
+									key_storage_adapter: {
+										_eq: 'target'
+									}
+								},
+								{
+									key_storage_adapter: {
+										_null: true
+									}
+								}
+							]
+						},
+						hidden: true
+					}
+				]
+			},
+			schema: {
+				required: false
+			}
+		},
+		{
+			field: 'delete_existing_hls',
+			name: 'Delete Existing HLS Files',
+			type: 'boolean',
+			meta: {
+				width: 'half',
+				interface: 'boolean',
+				note: 'If enabled, automatically deletes all existing HLS files (playlists, segments, keys) from Directus database and storage before generating fresh secured HLS files.',
+				conditions: [
+					{
+						name: 'Hide when process_mode is audio or transcription only',
+						rule: {
+							process_mode: {
+								_in: ['audio_only', 'transcription_only']
+							}
+						},
+						hidden: true
+					}
+				]
+			},
+			schema: {
+				default_value: false
 			}
 		},
 		{

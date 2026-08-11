@@ -18,14 +18,13 @@ This extension adds a custom operation to Directus Flows that automatically tran
 - **High Bit Depth Support**: Automatically detects and converts 10-bit videos to 8-bit for maximum compatibility
 - **Folder Organization**: Automatically creates and organizes transcoded files in Directus folders
 - **Video Metadata Extraction**: Extracts dimensions, duration, and orientation information
-- **Cloud Storage Support**: Works with local storage, S3, GCS, Azure, and other cloud storage adapters
+- **Cloud Storage & Cloudflare R2 Support**: Works with local storage, Cloudflare R2, S3, GCS, Azure, and other cloud storage adapters
   - Automatically downloads source files from cloud storage for processing
-  - Uploads transcoded files to specified storage location
+  - Uploads transcoded files directly to Cloudflare R2 or specified storage location
   - Cleans up temporary local files when using cloud storage
-- **Flexible Storage Configuration**: Choose where transcoded files are stored:
-  - Environment default (first configured storage)
-  - Same as source file
-  - Custom storage location
+- **Flexible Storage & Key Security Configuration**: Choose where transcoded files and encryption keys are stored:
+  - **Cloudflare R2 Storage**: Save master playlists, quality playlists, and `.ts` segment files directly to Cloudflare R2
+  - **Secured Key Preservation**: Keep the AES-128 encryption key (`filename.key`) saved at Directus while hosting HLS files on Cloudflare R2, so streaming from Cloudflare remains fully secured via Directus authentication
  
 
 ## Requirements
@@ -124,15 +123,25 @@ directus/extensions/directus-extension-transcode-video-operation/
   - Only qualities equal to or lower than source resolution will be transcoded (no upscaling)
   - Example: A 1080p source video will only transcode 240p, 480p, 720p, and 1080p (4K will be skipped)
 
-- **Storage Adapter** (optional, default: `Environment Configuration (First One)`): Where transcoded files should be stored
+- **Storage Adapter** (optional, default: `Environment Configuration (First One)`): Where transcoded HLS files (playlists & segments) should be stored
   - **Environment Configuration (First One)**: Uses the first configured storage location from environment variables
   - **Same as Source File**: Stores transcoded files in the same storage location as the source file
+  - **Cloudflare R2 Storage (STORAGE_R2)**: Stores HLS playlists and video segments directly in Cloudflare R2 storage
   - **Other**: Allows specifying a custom storage location name (must match one of your configured `STORAGE_LOCATIONS`)
 
 - **Target Storage Location** (optional): Custom storage location name
   - Only visible when "Storage Adapter" is set to "Other"
-  - Must match one of your configured storage locations (e.g., `local`, `s3`, `gcs`)
-  - Example: If you have `STORAGE_LOCATIONS="local,s3"`, you can specify `s3` here
+  - Must match one of your configured storage locations (e.g., `local`, `r2`, `s3`, `gcs`)
+  - Example: If you have `STORAGE_LOCATIONS="local,r2,s3"`, you can specify `r2` here
+
+- **Key Storage Location** (optional, default: `Save Key in Directus (Local/Default Storage)`): Where the HLS AES-128 encryption key (`filename.key`) is stored
+  - **Save Key in Directus (Local/Default Storage)** (default): Saves the encryption key in Directus local/default storage so it is NOT uploaded to Cloudflare R2. This ensures video playback served from Cloudflare R2 remains fully secured via Directus key authorization.
+  - **Same as HLS Target Storage**: Stores the encryption key in the same storage location as HLS files
+  - **Other Custom Location**: Stores the key in a custom storage location specified by `Key Custom Storage Location`
+
+- **Delete Existing HLS Files** (optional, default: `false`): Enable when reprocessing existing videos
+  - If enabled (`true`), automatically purges all previously transcoded HLS file records and physical files from Directus database and storage before generating fresh AES-128 secured HLS streams.
+  - Use this option when migrating older unencrypted HLS videos to the new secured AES-128 format on Cloudflare R2.
 
 - **Thread Count** (optional, default: `1`): Number of CPU threads to use for encoding
   - `1` = Single-threaded encoding (default, most compatible)

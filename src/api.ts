@@ -56,8 +56,11 @@ interface OperationInput {
 	qualities?: string[] | string;
 	threads?: number | string;
 	nice?: number | string;
-	storage_adapter?: 'default' | 'source' | 'custom';
+	storage_adapter?: 'default' | 'source' | 'r2' | 'custom';
 	target_storage?: string;
+	key_storage_adapter?: 'directus' | 'target' | 'custom';
+	key_target_storage?: string;
+	delete_existing_hls?: boolean;
 	generate_captions?: boolean;
 	caption_language?: string;
 	caption_endpoint?: string;
@@ -134,6 +137,9 @@ export default {
 			nice,
 			storage_adapter = 'default',
 			target_storage,
+			key_storage_adapter = 'directus',
+			key_target_storage,
+			delete_existing_hls = false,
 			generate_captions = false,
 			caption_language,
 			caption_endpoint,
@@ -274,6 +280,14 @@ export default {
 		if (storage_adapter === 'source') {
 			// Use the same storage as the source file
 			targetStorageAdapter = fileObject.storage || defaultStorageAdapter;
+		} else if (storage_adapter === 'r2') {
+			// Explicitly target Cloudflare R2 storage
+			const r2Location = storageLocations.find(loc => loc.toLowerCase() === 'r2' || loc.toLowerCase() === 'cloudflare') || 'r2';
+			if (!validateStorageExists(r2Location)) {
+				logger.warn(`[transcode-video-operation] (${filename}) Storage location "${r2Location}" (STORAGE_${r2Location.toUpperCase()}_DRIVER) is not configured in environment. Available locations: ${JSON.stringify(storageLocations)}`);
+			}
+			targetStorageAdapter = r2Location;
+			logger.info(`[transcode-video-operation] (${filename}) Using Cloudflare R2 storage location: ${targetStorageAdapter}`);
 		} else if (storage_adapter === 'custom' && target_storage) {
 			// Validate that the custom storage location exists
 			if (!validateStorageExists(target_storage)) {
@@ -288,7 +302,26 @@ export default {
 			targetStorageAdapter = defaultStorageAdapter;
 		}
 
-		logger.info(`[transcode-video-operation] (${filename}) Using storage adapter: ${targetStorageAdapter}`);
+		logger.info(`[transcode-video-operation] (${filename}) Using storage adapter for HLS files: ${targetStorageAdapter}`);
+
+		// Determine key storage adapter
+		let keyStorageAdapter: string;
+		if (key_storage_adapter === 'target') {
+			keyStorageAdapter = targetStorageAdapter;
+		} else if (key_storage_adapter === 'custom' && key_target_storage) {
+			if (!validateStorageExists(key_target_storage)) {
+				const errorMsg = `Custom key storage location "${key_target_storage}" does not exist. Please ensure STORAGE_${key_target_storage.toUpperCase()}_DRIVER is configured. Available locations: ${JSON.stringify(storageLocations)}`;
+				logger.error(`[transcode-video-operation] (${filename}) ${errorMsg}`);
+				throw new Error(errorMsg);
+			}
+			keyStorageAdapter = key_target_storage;
+			logger.info(`[transcode-video-operation] (${filename}) Using custom key storage location: ${key_target_storage}`);
+		} else {
+			// Default / 'directus': Save Key in Directus default storage (first configured storage location or local)
+			keyStorageAdapter = defaultStorageAdapter;
+		}
+
+		logger.info(`[transcode-video-operation] (${filename}) Using key storage adapter: ${keyStorageAdapter}`);
 
 		// Determine target storage driver early (used for output directory and cleanup)
 		const targetStorageDriver = getStorageDriver(targetStorageAdapter);
@@ -552,7 +585,7 @@ export default {
 					m3u8: "application/x-mpegurl"
 				};
 
-				const storage = targetStorageAdapter || options.storage;
+				const storage = options.storage || targetStorageAdapter;
 				const mimetype = options.mimetype || types[extension] || 'application/octet-stream';
 
 				// Check if file already exists in Directus
@@ -605,12 +638,20 @@ export default {
 
 				let fileId: string;
 				try {
-					if (isLocalStorage) {
-						// For local storage: file is already on disk, just create the database record
-						// Use createOne() to avoid moving/copying the file
+					const fileStorageDriver = getStorageDriver(storage);
+					const isFileLocalStorage = fileStorageDriver === 'local';
+					const storagePath = isFileLocalStorage ? resolveStorage(storage) : null;
+					const basePath = process.env.PWD || '/directus';
+					const storageFullPath = storagePath ? path.join(basePath, storagePath) : null;
+					const isFileInStorageDir = storageFullPath && filePath.startsWith(storageFullPath);
+
+					if (isFileLocalStorage && isFileInStorageDir) {
+						// For local storage where file is already in the target storage directory:
+						// Just create the database record using createOne()
 						fileId = await filesService.createOne(fileData);
 					} else {
-						// For cloud storage: create a stream and upload to the configured storage adapter
+						// For cloud storage OR local storage when file is in a temp directory:
+						// Use uploadOne() to upload/write the file stream to the configured storage driver
 						const fileStream = fs.createReadStream(filePath);
 
 						// Handle stream errors
@@ -618,8 +659,6 @@ export default {
 							logger.error(`[transcode-video-operation] (${filename}) File stream error for ${fileName}:`, streamError);
 						});
 
-						// Use uploadOne() for cloud storage to upload the file stream
-						// Signature: uploadOne(stream, data, existingPrimaryKey?)
 						fileId = await filesService.uploadOne(
 							fileStream,
 							fileData
@@ -694,11 +733,21 @@ export default {
 						const originalKeyURI = uriMatch[1];
 						const keyBasename = path.basename(originalKeyURI);
 
-						// Only replace if it's a relative path (not a full URL from keyBaseUrl)
-						// and we're using file IDs
-						if (!useFilenameDisk && !originalKeyURI.includes('://')) {
-							const keyId = fileIdMap[originalKeyURI] || fileIdMap[keyBasename];
-							if (keyId) {
+						const keyId = fileIdMap[originalKeyURI] || fileIdMap[keyBasename];
+
+						if (keyBaseUrl) {
+							// If keyBaseUrl is explicitly configured:
+							const formattedKeyBaseUrl = keyBaseUrl.endsWith('/') ? keyBaseUrl.slice(0, -1) : keyBaseUrl;
+							const keyRef = useFilenameDisk ? keyBasename : (keyId || keyBasename);
+							newLine = line.replace(`URI="${originalKeyURI}"`, `URI="${formattedKeyBaseUrl}/${keyRef}"`);
+						} else if (keyId) {
+							// Check if key is stored in a different location than HLS files (e.g. key on Directus, HLS on Cloudflare R2)
+							const isKeyOnDifferentStorage = keyStorageAdapter !== targetStorageAdapter;
+							if (isKeyOnDifferentStorage) {
+								// When key is on Directus while HLS files are hosted on Cloudflare R2 / cloud,
+								// player fetching playlist from Cloudflare needs absolute Directus asset URL to fetch key from Directus!
+								newLine = line.replace(`URI="${originalKeyURI}"`, `URI="${baseUrl}/assets/${keyId}"`);
+							} else if (!useFilenameDisk) {
 								newLine = line.replace(`URI="${originalKeyURI}"`, `URI="${keyId}"`);
 							}
 						}
@@ -1263,6 +1312,72 @@ export default {
 		let qualitiesRaw: any[] = [];
 
 		if (process_mode === 'all' || process_mode === 'hls_only') {
+			if (delete_existing_hls) {
+				logger.info(`[transcode-video-operation] (${filename}) delete_existing_hls is enabled. Purging all existing HLS files from Directus database and storage...`);
+				try {
+					const { FilesService } = services;
+					const filesService = new FilesService({
+						schema: await getSchema(),
+					});
+
+					// Find files in the target virtual folder or matching filename pattern
+					const filter: any = {
+						_or: [
+							{ folder: { _eq: targetFolderId } },
+							{ filename_disk: { _starts_with: `${filename}_` } },
+							{ filename_disk: { _eq: `${filename}.key` } }
+						]
+					};
+
+					const existingFilesToDelete = await filesService.readByQuery({
+						filter: filter,
+						fields: ['id', 'filename_disk', 'storage'],
+						limit: -1
+					});
+
+					if (existingFilesToDelete && Array.isArray(existingFilesToDelete) && existingFilesToDelete.length > 0) {
+						logger.info(`[transcode-video-operation] (${filename}) Found ${existingFilesToDelete.length} existing file record(s) to delete`);
+						for (const fileRecord of existingFilesToDelete) {
+							const fileIdToDelete = fileRecord?.id || fileRecord?.data?.id || (typeof fileRecord === 'string' ? fileRecord : null);
+							const fnDisk = fileRecord?.filename_disk || fileIdToDelete;
+							if (fileIdToDelete) {
+								try {
+									// deleteOne deletes DB record AND removes file from physical storage driver (S3, R2, or local)
+									await filesService.deleteOne(fileIdToDelete);
+									logger.info(`[transcode-video-operation] (${filename}) Deleted existing file: ${fnDisk} (ID: ${fileIdToDelete})`);
+								} catch (delError) {
+									logger.warn(`[transcode-video-operation] (${filename}) Could not delete existing file record ${fileIdToDelete}:`, delError);
+								}
+							}
+						}
+					} else {
+						logger.info(`[transcode-video-operation] (${filename}) No existing file records found in Directus to delete`);
+					}
+				} catch (purgeError) {
+					logger.error(`[transcode-video-operation] (${filename}) Error during deletion of existing HLS file records:`, purgeError);
+				}
+
+				// Also clean up any local disk files in outputDir matching this video (excluding original source file)
+				if (fs.existsSync(outputDir)) {
+					try {
+						const localFiles = fs.readdirSync(outputDir).filter(fn => fn.startsWith(filename) && fn !== fileObject.filename_disk);
+						for (const fn of localFiles) {
+							const localPath = path.join(outputDir, fn);
+							try {
+								if (fs.existsSync(localPath)) {
+									fs.unlinkSync(localPath);
+									logger.info(`[transcode-video-operation] (${filename}) Deleted old local file on disk: ${fn}`);
+								}
+							} catch (unlinkErr) {
+								logger.warn(`[transcode-video-operation] (${filename}) Could not delete old local file ${fn}:`, unlinkErr);
+							}
+						}
+					} catch (readdirErr) {
+						logger.warn(`[transcode-video-operation] (${filename}) Error reading local directory for cleanup:`, readdirErr);
+					}
+				}
+			}
+
 			let encryptionKey: Buffer;
 			if (fs.existsSync(keyFileLocalPath)) {
 				// Load the existing key to avoid breaking existing encrypted segments!
@@ -1566,9 +1681,10 @@ export default {
 			// --- Upload HLS Encryption Key ---
 			if (fs.existsSync(keyFileLocalPath)) {
 				try {
-					logger.info(`[transcode-video-operation] (${filename}) Uploading HLS encryption key: ${keyFilename}`);
+					logger.info(`[transcode-video-operation] (${filename}) Uploading HLS encryption key: ${keyFilename} to key storage: ${keyStorageAdapter}`);
 					const keyId = await uploadFileToDirectus(keyFileLocalPath, targetFolderId, {
-						mimetype: 'application/octet-stream'
+						mimetype: 'application/octet-stream',
+						storage: keyStorageAdapter
 					});
 					fileIdMap[keyFilename] = keyId;
 					uploadedFiles.push({ filename_disk: keyFilename, id: keyId });
@@ -2089,10 +2205,21 @@ export default {
 		if (!isLocalTarget) {
 			try {
 				logger.info(`[transcode-video-operation] (${filename}) Cleaning up local transcoded files (using cloud storage: ${targetStorageAdapter})...`);
+				const keyStorageDriver = getStorageDriver(keyStorageAdapter);
+				const isKeyLocalStorage = keyStorageDriver === 'local';
+				const keyStoragePath = isKeyLocalStorage ? resolveStorage(keyStorageAdapter) : null;
+				const basePath = process.env.PWD || '/directus';
+				const keyStorageFullPath = keyStoragePath ? path.join(basePath, keyStoragePath) : null;
+
 				const allTranscodedFiles = readFiles(outputDir);
 				for (const fileToDelete of allTranscodedFiles) {
 					// Don't delete the source file
 					if (fileToDelete === fileObject.filename_disk) {
+						continue;
+					}
+					// Don't delete key file if it's stored in local storage output directory
+					if (fileToDelete === keyFilename && isKeyLocalStorage && outputDir === keyStorageFullPath) {
+						logger.info(`[transcode-video-operation] (${filename}) Preserving encryption key in local storage: ${keyFilename}`);
 						continue;
 					}
 					const filePathToDelete = `${outputDir}/${fileToDelete}`;
