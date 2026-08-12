@@ -1320,13 +1320,31 @@ export default {
 						schema: await getSchema(),
 					});
 
-					// Find files in the target virtual folder or matching filename pattern
+					// Find files in the target virtual folder or matching filename pattern (excluding the source input file)
+					const sourceFileId = fileObject.id || (fileObject as any).data?.id || (typeof file === 'string' ? file : null);
+					const sourceFileNameDisk = fileObject.filename_disk;
+					const sourceFileNameDownload = fileObject.filename_download;
+
+					const filterConditions: any[] = [
+						{
+							_or: [
+								{ folder: { _eq: targetFolderId } },
+								{ filename_disk: { _starts_with: `${filename}_` } },
+								{ filename_disk: { _eq: `${filename}.key` } },
+								{ filename_disk: { _eq: `${filename}.m3u8` } }
+							]
+						}
+					];
+
+					if (sourceFileId) {
+						filterConditions.push({ id: { _neq: String(sourceFileId) } });
+					}
+					if (sourceFileNameDisk) {
+						filterConditions.push({ filename_disk: { _neq: sourceFileNameDisk } });
+					}
+
 					const filter: any = {
-						_or: [
-							{ folder: { _eq: targetFolderId } },
-							{ filename_disk: { _starts_with: `${filename}_` } },
-							{ filename_disk: { _eq: `${filename}.key` } }
-						]
+						_and: filterConditions
 					};
 
 					const existingFilesToDelete = await filesService.readByQuery({
@@ -1340,6 +1358,17 @@ export default {
 						for (const fileRecord of existingFilesToDelete) {
 							const fileIdToDelete = fileRecord?.id || fileRecord?.data?.id || (typeof fileRecord === 'string' ? fileRecord : null);
 							const fnDisk = fileRecord?.filename_disk || fileIdToDelete;
+
+							// CRITICAL SAFETY CHECK: NEVER delete the source input video file!
+							if (
+								(sourceFileId && String(fileIdToDelete) === String(sourceFileId)) ||
+								(sourceFileNameDisk && fnDisk === sourceFileNameDisk) ||
+								(sourceFileNameDownload && fnDisk === sourceFileNameDownload)
+							) {
+								logger.info(`[transcode-video-operation] (${filename}) Skipping deletion of source video file: ${fnDisk} (ID: ${fileIdToDelete})`);
+								continue;
+							}
+
 							if (fileIdToDelete) {
 								try {
 									// deleteOne deletes DB record AND removes file from physical storage driver (S3, R2, or local)
@@ -1360,7 +1389,11 @@ export default {
 				// Also clean up any local disk files in outputDir matching this video (excluding original source file)
 				if (fs.existsSync(outputDir)) {
 					try {
-						const localFiles = fs.readdirSync(outputDir).filter(fn => fn.startsWith(filename) && fn !== fileObject.filename_disk);
+						const localFiles = fs.readdirSync(outputDir).filter(fn => 
+							fn.startsWith(filename) && 
+							fn !== fileObject.filename_disk && 
+							fn !== fileObject.filename_download
+						);
 						for (const fn of localFiles) {
 							const localPath = path.join(outputDir, fn);
 							try {
