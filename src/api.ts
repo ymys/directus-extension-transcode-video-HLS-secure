@@ -1121,7 +1121,7 @@ export default {
 		}
 
 		// Handle source file location (local vs cloud storage)
-		let filePath: string;
+		let filePath: string = '';
 		let tempSourceFile: string | null = null;
 		let needsCleanup = false;
 
@@ -1129,29 +1129,26 @@ export default {
 		const sourceStorageDriver = getStorageDriver(fileObject.storage);
 		const isLocalSource = sourceStorageDriver === 'local';
 
+		let isFileAvailableOnDisk = false;
+
 		if (isLocalSource) {
-			// Local storage: file is on disk
+			// Local storage: check if file is physically on disk
 			const storagePath = resolveStorage(fileObject.storage);
-			if (!storagePath) {
-				return {
-					error: `No storage found for location <${fileObject.storage}>`
+			if (storagePath) {
+				const basePath = process.env.PWD || '/directus';
+				const candidatePath = path.join(basePath, `${storagePath}/${fileObject.filename_disk}`);
+				if (fs.existsSync(candidatePath)) {
+					filePath = candidatePath;
+					isFileAvailableOnDisk = true;
+				} else {
+					logger.warn(`[transcode-video-operation] (${filename}) Local storage path missing on disk (${candidatePath}), falling back to downloading via Directus assets API...`);
 				}
 			}
+		}
 
-			// Construct file path - use process.env.PWD or fallback to /directus
-			const basePath = process.env.PWD || '/directus';
-			filePath = path.join(basePath, `${storagePath}/${fileObject.filename_disk}`);
-
-			// Verify source file exists
-			if (!fs.existsSync(filePath)) {
-				logger.error(`[transcode-video-operation] (${filename}) Source file not found: %s`, filePath);
-				return {
-					error: `Source file not found: ${filePath}`
-				};
-			}
-		} else {
-			// Cloud storage: need to download file first
-			logger.info(`[transcode-video-operation] (${filename}) Source file is in cloud storage (${fileObject.storage}, driver: ${sourceStorageDriver}), downloading to temporary location...`);
+		if (!isFileAvailableOnDisk) {
+			// Cloud storage OR local file not found on disk: download via Directus assets endpoint
+			logger.info(`[transcode-video-operation] (${filename}) Source file is in cloud storage or not found on local disk (${fileObject.storage}, driver: ${sourceStorageDriver}), downloading to temporary location via Directus assets API...`);
 			try {
 				// Get file ID from fileObject - try multiple possible locations
 				let fileId: string | null = null;
@@ -1196,11 +1193,9 @@ export default {
 				}
 
 				// Download file to temporary location using HTTP request to Directus assets endpoint
-				// This works for all storage types (local, S3, GCS, etc.)
+				// This works for all storage types (local, S3, GCS, R2, etc.)
 				const tempFilePath = path.join(tempDir, `${fileId}_${fileObject.filename_disk}`);
 				tempSourceFile = tempFilePath;
-
-				// baseUrl is resolved at the top of the handler
 
 				if (!fileId || typeof fileId !== 'string' || fileId.trim() === '') {
 					logger.error(`[transcode-video-operation] (${filename}) Invalid fileId: ${fileId}`);
@@ -1211,7 +1206,7 @@ export default {
 
 				const assetUrl = `${baseUrl}/assets/${fileId}`;
 
-				logger.info(`[transcode-video-operation] (${filename}) Source file is in cloud storage (${sourceStorageDriver}), downloading to temporary location...`);
+				logger.info(`[transcode-video-operation] (${filename}) Downloading source file from ${assetUrl}...`);
 
 				await new Promise<void>((resolve, reject) => {
 					// Validate URL before making request
@@ -1241,16 +1236,16 @@ export default {
 
 				filePath = tempSourceFile;
 				needsCleanup = true;
-				logger.info(`[transcode-video-operation] (${filename}) Source file downloaded to: ${filePath}`);
+				logger.info(`[transcode-video-operation] (${filename}) Source file downloaded successfully to: ${filePath}`);
 			} catch (error) {
 				const errorMessage = error instanceof Error ? error.message : String(error);
 				const errorStack = error instanceof Error ? error.stack : undefined;
-				logger.error(`[transcode-video-operation] (${filename}) Error downloading source file from cloud storage: ${errorMessage}`);
+				logger.error(`[transcode-video-operation] (${filename}) Error downloading source file from Directus assets API: ${errorMessage}`);
 				if (errorStack) {
 					logger.error(`[transcode-video-operation] (${filename}) Error stack: ${errorStack}`);
 				}
 				return {
-					error: `Failed to download source file from cloud storage: ${errorMessage}`
+					error: `Failed to download source file from Directus assets API: ${errorMessage}`
 				};
 			}
 		}
