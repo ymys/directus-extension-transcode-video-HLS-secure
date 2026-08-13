@@ -1393,6 +1393,9 @@ export default {
 
 					if (existingFilesToDelete && Array.isArray(existingFilesToDelete) && existingFilesToDelete.length > 0) {
 						logger.info(`[transcode-video-operation] (${filename}) Found ${existingFilesToDelete.length} existing HLS file record(s) to delete`);
+						
+						const idsToDelete: string[] = [];
+
 						for (const fileRecord of existingFilesToDelete) {
 							const fileIdToDelete = fileRecord?.id || fileRecord?.data?.id || (typeof fileRecord === 'string' ? fileRecord : null);
 							const fnDisk = fileRecord?.filename_disk || fileIdToDelete;
@@ -1413,12 +1416,28 @@ export default {
 							}
 
 							if (fileIdToDelete) {
+								idsToDelete.push(String(fileIdToDelete));
+							}
+						}
+
+						if (idsToDelete.length > 0) {
+							logger.info(`[transcode-video-operation] (${filename}) Deleting ${idsToDelete.length} existing HLS file record(s) in batch...`);
+							const batchSize = 100;
+							for (let i = 0; i < idsToDelete.length; i += batchSize) {
+								const batch = idsToDelete.slice(i, i + batchSize);
 								try {
-									// deleteOne deletes DB record AND removes file from physical storage driver (S3, R2, or local)
-									await filesService.deleteOne(fileIdToDelete);
-									logger.info(`[transcode-video-operation] (${filename}) Deleted existing HLS file: ${fnDisk} (ID: ${fileIdToDelete})`);
-								} catch (delError) {
-									logger.warn(`[transcode-video-operation] (${filename}) Could not delete existing HLS file record ${fileIdToDelete}:`, delError);
+									await filesService.deleteMany(batch);
+									logger.info(`[transcode-video-operation] (${filename}) Deleted batch of ${batch.length} existing HLS file record(s) (${Math.min(i + batchSize, idsToDelete.length)}/${idsToDelete.length})`);
+								} catch (batchErr) {
+									logger.warn(`[transcode-video-operation] (${filename}) Error deleting batch of HLS files, falling back to individual deletion for this batch:`, batchErr);
+									for (const singleId of batch) {
+										try {
+											await filesService.deleteOne(singleId);
+											logger.info(`[transcode-video-operation] (${filename}) Deleted existing HLS file: ${singleId}`);
+										} catch (delError) {
+											logger.warn(`[transcode-video-operation] (${filename}) Could not delete existing HLS file record ${singleId}:`, delError);
+										}
+									}
 								}
 							}
 						}
