@@ -167,24 +167,47 @@ export default {
 			throw new Error("folder_id parameter is required");
 		}
 
-		// If file is a UUID string, fetch the file from Directus
+		// Robust file object resolution: fetch complete record from Directus DB regardless of how file input was passed
 		let fileObject: File;
-		if (typeof file === 'string') {
-			try {
-				const { FilesService } = services;
-				const filesService = new FilesService({
-					schema: await getSchema(),
-				});
+		let targetFileId: string | null = null;
 
-				const fileRecord = await filesService.readOne(file);
+		if (typeof file === 'string') {
+			targetFileId = file;
+		} else if (file && typeof file === 'object') {
+			targetFileId = file.id || (file as any).data?.id || file.key || file.file || null;
+		}
+
+		const { FilesService } = services;
+		const filesService = new FilesService({
+			schema: await getSchema(),
+		});
+
+		if (targetFileId) {
+			try {
+				const fileRecord = await filesService.readOne(targetFileId);
 				fileObject = fileRecord as File;
-				logger.info(`[transcode-video-operation] Fetched file from UUID: ${file}`);
+				logger.info(`[transcode-video-operation] Fetched file record from UUID: ${targetFileId}`);
 			} catch (error) {
-				logger.error(`[transcode-video-operation] Error fetching file with UUID ${file}:`, error);
-				throw new Error(`Failed to fetch file with UUID ${file}: ${error instanceof Error ? error.message : String(error)}`);
+				logger.warn(`[transcode-video-operation] Could not fetch file record with ID ${targetFileId}, falling back to provided input object:`, error);
+				fileObject = file as File;
+			}
+		} else if (file && typeof file === 'object' && file.filename_disk) {
+			try {
+				const records = await filesService.readByQuery({
+					filter: { filename_disk: { _eq: file.filename_disk } },
+					limit: 1
+				});
+				if (records && records.length > 0) {
+					fileObject = records[0] as File;
+					logger.info(`[transcode-video-operation] Fetched file record by filename_disk: ${file.filename_disk}`);
+				} else {
+					fileObject = file as File;
+				}
+			} catch (err) {
+				fileObject = file as File;
 			}
 		} else {
-			fileObject = file;
+			fileObject = file as File;
 		}
 
 		if (!fileObject?.filename_disk) {
@@ -370,7 +393,11 @@ export default {
 		const hlsFolderId = folder_id;
 
 		const readFiles = (linkFilePath: string): string[] => {
-			const data = fs.readdirSync(linkFilePath, 'utf-8').filter(fn => fn.startsWith(filename));
+			const data = fs.readdirSync(linkFilePath, 'utf-8').filter(fn => 
+				(fn.startsWith(`${filename}_`) || fn === `${filename}.m3u8` || fn === `${filename}.key`) && 
+				fn !== fileObject.filename_disk && 
+				fn !== fileObject.filename_download
+			);
 			return data;
 		}
 
@@ -1320,18 +1347,29 @@ export default {
 						schema: await getSchema(),
 					});
 
-					// Find files in the target virtual folder or matching filename pattern (excluding the source input file)
-					const sourceFileId = fileObject.id || (fileObject as any).data?.id || (typeof file === 'string' ? file : null);
+					// Find existing HLS files matching this video's transcode outputs (excluding the source input file)
+					const sourceFileId = fileObject.id || (fileObject as any).data?.id || targetFileId || (typeof file === 'string' ? file : null);
 					const sourceFileNameDisk = fileObject.filename_disk;
 					const sourceFileNameDownload = fileObject.filename_download;
 
 					const filterConditions: any[] = [
 						{
 							_or: [
-								{ folder: { _eq: targetFolderId } },
 								{ filename_disk: { _starts_with: `${filename}_` } },
 								{ filename_disk: { _eq: `${filename}.key` } },
-								{ filename_disk: { _eq: `${filename}.m3u8` } }
+								{ filename_disk: { _eq: `${filename}.m3u8` } },
+								{
+									_and: [
+										{ folder: { _eq: targetFolderId } },
+										{
+											_or: [
+												{ filename_disk: { _ends_with: '.ts' } },
+												{ filename_disk: { _ends_with: '.m3u8' } },
+												{ filename_disk: { _ends_with: '.key' } }
+											]
+										}
+									]
+								}
 							]
 						}
 					];
@@ -1349,23 +1387,28 @@ export default {
 
 					const existingFilesToDelete = await filesService.readByQuery({
 						filter: filter,
-						fields: ['id', 'filename_disk', 'storage'],
+						fields: ['id', 'filename_disk', 'filename_download', 'storage', 'type'],
 						limit: -1
 					});
 
 					if (existingFilesToDelete && Array.isArray(existingFilesToDelete) && existingFilesToDelete.length > 0) {
-						logger.info(`[transcode-video-operation] (${filename}) Found ${existingFilesToDelete.length} existing file record(s) to delete`);
+						logger.info(`[transcode-video-operation] (${filename}) Found ${existingFilesToDelete.length} existing HLS file record(s) to delete`);
 						for (const fileRecord of existingFilesToDelete) {
 							const fileIdToDelete = fileRecord?.id || fileRecord?.data?.id || (typeof fileRecord === 'string' ? fileRecord : null);
 							const fnDisk = fileRecord?.filename_disk || fileIdToDelete;
+							const fnDownload = fileRecord?.filename_download;
 
-							// CRITICAL SAFETY CHECK: NEVER delete the source input video file!
-							if (
+							// ABSOLUTE SAFETY CHECK: NEVER delete the source input video file under ANY circumstances!
+							const isSourceFile = 
 								(sourceFileId && String(fileIdToDelete) === String(sourceFileId)) ||
-								(sourceFileNameDisk && fnDisk === sourceFileNameDisk) ||
-								(sourceFileNameDownload && fnDisk === sourceFileNameDownload)
-							) {
-								logger.info(`[transcode-video-operation] (${filename}) Skipping deletion of source video file: ${fnDisk} (ID: ${fileIdToDelete})`);
+								(sourceFileNameDisk && fnDisk.toLowerCase() === sourceFileNameDisk.toLowerCase()) ||
+								(sourceFileNameDownload && fnDisk.toLowerCase() === sourceFileNameDownload.toLowerCase()) ||
+								(fnDownload && sourceFileNameDisk && fnDownload.toLowerCase() === sourceFileNameDisk.toLowerCase()) ||
+								(fnDisk.toLowerCase() === `${filename}.${extension}`.toLowerCase()) ||
+								(fileRecord?.type && fileObject?.type && fileRecord.type === fileObject.type && !fnDisk.endsWith('.ts') && !fnDisk.endsWith('.m3u8') && !fnDisk.endsWith('.key'));
+
+							if (isSourceFile) {
+								logger.warn(`[transcode-video-operation] (${filename}) ABSOLUTE SAFETY PREVENTED DELETION of source video file: ${fnDisk} (ID: ${fileIdToDelete})`);
 								continue;
 							}
 
@@ -1373,33 +1416,34 @@ export default {
 								try {
 									// deleteOne deletes DB record AND removes file from physical storage driver (S3, R2, or local)
 									await filesService.deleteOne(fileIdToDelete);
-									logger.info(`[transcode-video-operation] (${filename}) Deleted existing file: ${fnDisk} (ID: ${fileIdToDelete})`);
+									logger.info(`[transcode-video-operation] (${filename}) Deleted existing HLS file: ${fnDisk} (ID: ${fileIdToDelete})`);
 								} catch (delError) {
-									logger.warn(`[transcode-video-operation] (${filename}) Could not delete existing file record ${fileIdToDelete}:`, delError);
+									logger.warn(`[transcode-video-operation] (${filename}) Could not delete existing HLS file record ${fileIdToDelete}:`, delError);
 								}
 							}
 						}
 					} else {
-						logger.info(`[transcode-video-operation] (${filename}) No existing file records found in Directus to delete`);
+						logger.info(`[transcode-video-operation] (${filename}) No existing HLS file records found in Directus to delete`);
 					}
 				} catch (purgeError) {
 					logger.error(`[transcode-video-operation] (${filename}) Error during deletion of existing HLS file records:`, purgeError);
 				}
 
-				// Also clean up any local disk files in outputDir matching this video (excluding original source file)
+				// Also clean up any local disk HLS files in outputDir matching this video (excluding original source file)
 				if (fs.existsSync(outputDir)) {
 					try {
 						const localFiles = fs.readdirSync(outputDir).filter(fn => 
-							fn.startsWith(filename) && 
+							(fn.startsWith(`${filename}_`) || fn === `${filename}.m3u8` || fn === `${filename}.key`) && 
 							fn !== fileObject.filename_disk && 
-							fn !== fileObject.filename_download
+							fn !== fileObject.filename_download &&
+							fn !== `${filename}.${extension}`
 						);
 						for (const fn of localFiles) {
 							const localPath = path.join(outputDir, fn);
 							try {
 								if (fs.existsSync(localPath)) {
 									fs.unlinkSync(localPath);
-									logger.info(`[transcode-video-operation] (${filename}) Deleted old local file on disk: ${fn}`);
+									logger.info(`[transcode-video-operation] (${filename}) Deleted old local HLS file on disk: ${fn}`);
 								}
 							} catch (unlinkErr) {
 								logger.warn(`[transcode-video-operation] (${filename}) Could not delete old local file ${fn}:`, unlinkErr);
