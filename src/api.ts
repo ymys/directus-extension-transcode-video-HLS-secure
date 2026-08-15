@@ -215,6 +215,34 @@ export default {
 			throw new Error("Input file missing filename_disk");
 		}
 
+		// --- EARLY EXIT GUARD: Prevent recursive or unwanted execution on HLS output files or non-media assets ---
+		const fnDiskLower = fileObject.filename_disk.toLowerCase();
+		const mimeTypeLower = (fileObject.type || '').toLowerCase();
+
+		const isHlsAssetExt = fnDiskLower.endsWith('.ts') || 
+			fnDiskLower.endsWith('.key') || 
+			fnDiskLower.endsWith('.m3u8') || 
+			fnDiskLower.endsWith('.keyinfo') ||
+			fnDiskLower.endsWith('.vtt') ||
+			fnDiskLower.endsWith('.srt');
+
+		const isHlsAssetPattern = fnDiskLower.includes('_master.m3u8') || 
+			fnDiskLower.includes('_thumb.jpg') || 
+			fnDiskLower.includes('_thumb.png') || 
+			/_\d+p(_\d+)?\.(m3u8|ts)$/i.test(fnDiskLower);
+
+		const isMediaFile = mimeTypeLower.startsWith('video/') || 
+			mimeTypeLower.startsWith('audio/') || 
+			['.mp4', '.mov', '.mkv', '.avi', '.webm', '.flv', '.wmv', '.m4v', '.3gp', '.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac'].some(ext => fnDiskLower.endsWith(ext));
+
+		if (isHlsAssetExt || isHlsAssetPattern || !isMediaFile) {
+			logger.info(`[transcode-video-operation] (${fileObject.filename_disk}) Skipping file: File is an HLS segment/asset or non-primary media file.`);
+			return {
+				skipped: true,
+				reason: `File ${fileObject.filename_disk} is an HLS asset or non-primary media file.`
+			};
+		}
+
 		const lastDotIndex = fileObject.filename_disk.lastIndexOf('.');
 		let filename: string;
 		let extension: string;
@@ -288,7 +316,11 @@ export default {
 			if (envValue) {
 				return String(envValue);
 			} else {
-				logger.warn(`[transcode-video-operation] (${filename}) No storage found for location <%s>`, location);
+				const driverKey = `STORAGE_${location.toUpperCase()}_DRIVER`;
+				const driver = env[driverKey];
+				if (!driver || driver === 'local') {
+					logger.warn(`[transcode-video-operation] (${filename}) No storage root found for local storage location <%s>`, location);
+				}
 				return null;
 			}
 		}
@@ -1313,9 +1345,10 @@ export default {
 				: path.join(basePath, targetStoragePath);
 			logger.info(`[transcode-video-operation] (${filename}) Target storage is local (${targetStorageAdapter}), output directory: ${outputDir}`);
 		} else {
-			// For cloud storage, use the same directory as source file (or temp)
-			outputDir = path.dirname(filePath);
-			logger.info(`[transcode-video-operation] (${filename}) Target storage is cloud (${targetStorageAdapter}), output directory: ${outputDir}`);
+			// For cloud storage, create a dedicated isolated temporary workspace directory so local uploads directory is NEVER polluted or touched!
+			const basePath = process.env.PWD || '/directus';
+			outputDir = path.join(basePath, 'tmp', 'transcode', `${filename}_${Date.now()}`);
+			logger.info(`[transcode-video-operation] (${filename}) Target storage is cloud (${targetStorageAdapter}), isolated output directory: ${outputDir}`);
 		}
 
 		logger.info(`[transcode-video-operation] (${filename}) File to be transcoded: %s`, filePath)
@@ -1431,12 +1464,15 @@ export default {
 							const fnDownload = fileRecord?.filename_download;
 
 							// ABSOLUTE SAFETY CHECK: NEVER delete the source input video file under ANY circumstances!
+							const isMediaFileExt = ['.mp4', '.mov', '.mkv', '.avi', '.webm', '.flv', '.wmv', '.m4v', '.3gp', '.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac'].some(ext => fnDisk.toLowerCase().endsWith(ext));
+
 							const isSourceFile = 
 								(sourceFileId && String(fileIdToDelete) === String(sourceFileId)) ||
 								(sourceFileNameDisk && fnDisk.toLowerCase() === sourceFileNameDisk.toLowerCase()) ||
 								(sourceFileNameDownload && fnDisk.toLowerCase() === sourceFileNameDownload.toLowerCase()) ||
 								(fnDownload && sourceFileNameDisk && fnDownload.toLowerCase() === sourceFileNameDisk.toLowerCase()) ||
 								(fnDisk.toLowerCase() === `${filename}.${extension}`.toLowerCase()) ||
+								isMediaFileExt ||
 								(fileRecord?.type && fileObject?.type && fileRecord.type === fileObject.type && !fnDisk.endsWith('.ts') && !fnDisk.endsWith('.m3u8') && !fnDisk.endsWith('.key'));
 
 							if (isSourceFile) {
@@ -2358,6 +2394,16 @@ export default {
 			} catch (error) {
 				logger.error(`[transcode-video-operation] (${filename}) Error cleaning up local files:`, error);
 				// Don't fail the operation if cleanup fails
+			}
+
+			// Clean up isolated temporary output directory if target is cloud storage
+			if (!isLocalTarget && fs.existsSync(outputDir)) {
+				try {
+					fs.rmSync(outputDir, { recursive: true, force: true });
+					logger.info(`[transcode-video-operation] (${filename}) Isolated temporary transcode directory cleaned up: ${outputDir}`);
+				} catch (rmErr) {
+					logger.warn(`[transcode-video-operation] (${filename}) Could not delete temporary transcode directory ${outputDir}:`, rmErr);
+				}
 			}
 		}
 
