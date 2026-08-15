@@ -265,12 +265,20 @@ export default {
 			: [];
 		const defaultStorageAdapter = storageLocations.length > 0 ? storageLocations[0] : "local";
 
-		// Helper function to validate if a storage location exists
+		// Helper function to validate if a storage location exists in Directus
 		const validateStorageExists = (location: string): boolean => {
+			const locLower = location.toLowerCase();
+			if (locLower === 'local') return true;
+
+			// Check if location is in STORAGE_LOCATIONS list if STORAGE_LOCATIONS is defined
+			const inLocationsList = storageLocations.length === 0 || 
+				storageLocations.some(loc => loc.toLowerCase() === locLower);
+
 			const driverKey = `STORAGE_${location.toUpperCase()}_DRIVER`;
-			const driverValue = env[driverKey];
-			return !!driverValue;
-		}
+			const hasDriver = !!env[driverKey];
+
+			return inLocationsList && hasDriver;
+		};
 
 		// Helper functions for storage resolution (needed early for output directory determination)
 		const resolveStorage = (location: string): string | null => {
@@ -303,18 +311,30 @@ export default {
 		if (storage_adapter === 'source') {
 			// Use the same storage as the source file
 			targetStorageAdapter = fileObject.storage || defaultStorageAdapter;
+			if (!validateStorageExists(targetStorageAdapter)) {
+				const errorMsg = `Source storage location "${targetStorageAdapter}" does not exist in Directus configuration. Please ensure "${targetStorageAdapter}" is added to STORAGE_LOCATIONS in your Directus .env file. Available locations: ${JSON.stringify(storageLocations)}`;
+				logger.error(`[transcode-video-operation] (${filename}) ${errorMsg}`);
+				throw new Error(errorMsg);
+			}
 		} else if (storage_adapter === 'r2') {
 			// Explicitly target Cloudflare R2 storage
-			const r2Location = storageLocations.find(loc => loc.toLowerCase() === 'r2' || loc.toLowerCase() === 'cloudflare') || 'r2';
+			const r2Location = storageLocations.find(loc => 
+				loc.toLowerCase() === 'r2' || 
+				loc.toLowerCase() === 'cloudflare' ||
+				loc.toLowerCase().includes('r2')
+			) || 'r2';
+
 			if (!validateStorageExists(r2Location)) {
-				logger.warn(`[transcode-video-operation] (${filename}) Storage location "${r2Location}" (STORAGE_${r2Location.toUpperCase()}_DRIVER) is not configured in environment. Available locations: ${JSON.stringify(storageLocations)}`);
+				const errorMsg = `Storage location "${r2Location}" does not exist in Directus configuration. Location "${r2Location}" must be added to STORAGE_LOCATIONS in your Directus .env file (e.g. STORAGE_LOCATIONS="local,${r2Location}") AND STORAGE_${r2Location.toUpperCase()}_DRIVER must be configured. Available configured locations: ${JSON.stringify(storageLocations)}`;
+				logger.error(`[transcode-video-operation] (${filename}) ${errorMsg}`);
+				throw new Error(errorMsg);
 			}
 			targetStorageAdapter = r2Location;
 			logger.info(`[transcode-video-operation] (${filename}) Using Cloudflare R2 storage location: ${targetStorageAdapter}`);
 		} else if (storage_adapter === 'custom' && target_storage) {
 			// Validate that the custom storage location exists
 			if (!validateStorageExists(target_storage)) {
-				const errorMsg = `Custom storage location "${target_storage}" does not exist. Please ensure STORAGE_${target_storage.toUpperCase()}_DRIVER is configured. Available locations: ${JSON.stringify(storageLocations)}`;
+				const errorMsg = `Custom storage location "${target_storage}" does not exist in Directus configuration. Please ensure "${target_storage}" is added to STORAGE_LOCATIONS in your Directus .env file and STORAGE_${target_storage.toUpperCase()}_DRIVER is configured. Available locations: ${JSON.stringify(storageLocations)}`;
 				logger.error(`[transcode-video-operation] (${filename}) ${errorMsg}`);
 				throw new Error(errorMsg);
 			}
@@ -323,6 +343,11 @@ export default {
 		} else {
 			// Use environment default (first configured storage location)
 			targetStorageAdapter = defaultStorageAdapter;
+			if (!validateStorageExists(targetStorageAdapter)) {
+				const errorMsg = `Default storage location "${targetStorageAdapter}" does not exist in Directus configuration. Available locations: ${JSON.stringify(storageLocations)}`;
+				logger.error(`[transcode-video-operation] (${filename}) ${errorMsg}`);
+				throw new Error(errorMsg);
+			}
 		}
 
 		logger.info(`[transcode-video-operation] (${filename}) Using storage adapter for HLS files: ${targetStorageAdapter}`);
@@ -333,7 +358,7 @@ export default {
 			keyStorageAdapter = targetStorageAdapter;
 		} else if (key_storage_adapter === 'custom' && key_target_storage) {
 			if (!validateStorageExists(key_target_storage)) {
-				const errorMsg = `Custom key storage location "${key_target_storage}" does not exist. Please ensure STORAGE_${key_target_storage.toUpperCase()}_DRIVER is configured. Available locations: ${JSON.stringify(storageLocations)}`;
+				const errorMsg = `Custom key storage location "${key_target_storage}" does not exist in Directus configuration. Please ensure "${key_target_storage}" is added to STORAGE_LOCATIONS in your Directus .env file and STORAGE_${key_target_storage.toUpperCase()}_DRIVER is configured. Available locations: ${JSON.stringify(storageLocations)}`;
 				logger.error(`[transcode-video-operation] (${filename}) ${errorMsg}`);
 				throw new Error(errorMsg);
 			}
@@ -342,6 +367,11 @@ export default {
 		} else {
 			// Default / 'directus': Save Key in Directus default storage (first configured storage location or local)
 			keyStorageAdapter = defaultStorageAdapter;
+			if (!validateStorageExists(keyStorageAdapter)) {
+				const errorMsg = `Default key storage location "${keyStorageAdapter}" is not valid in Directus. Available locations: ${JSON.stringify(storageLocations)}`;
+				logger.error(`[transcode-video-operation] (${filename}) ${errorMsg}`);
+				throw new Error(errorMsg);
+			}
 		}
 
 		logger.info(`[transcode-video-operation] (${filename}) Using key storage adapter: ${keyStorageAdapter}`);
@@ -722,6 +752,10 @@ export default {
 				const errorMessage = error instanceof Error ? error.message : String(error);
 				const errorStack = error instanceof Error ? error.stack : undefined;
 				logger.error(`[transcode-video-operation] (${filename}) Error creating file record for ${filePath}: ${errorMessage}`);
+				if (errorMessage.includes("doesn't exist") || errorMessage.includes("Location")) {
+					logger.error(`[transcode-video-operation] (${filename}) DIRECTUS STORAGE DIAGNOSTIC: Directus rejected storage location "${options.storage || targetStorageAdapter}".`);
+					logger.error(`[transcode-video-operation] (${filename}) Common causes: 1) Directus server was not restarted after updating .env (Directus loads STORAGE_LOCATIONS only on boot). 2) Missing STORAGE_R2_S3_FORCE_PATH_STYLE="true" for Cloudflare R2. 3) STORAGE_R2_KEY is invalid or using a User API Token (cfat_...) instead of an R2 S3 Access Key ID (32-hex string).`);
+				}
 				if (errorStack) {
 					logger.error(`[transcode-video-operation] (${filename}) Error stack: ${errorStack}`);
 				}
