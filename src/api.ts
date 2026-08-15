@@ -1488,7 +1488,7 @@ export default {
 							const isSourceDlMatch = !!(srcFnDlStr && fnDisk === srcFnDlStr);
 							const isSourceFullMatch = fnDisk === fullFilenameExt;
 							const isMediaExtMatch = mediaExtensions.some(ext => fnDisk.endsWith(ext) || fnDownload.endsWith(ext));
-							const isHlsExtension = fnDisk.endsWith('.ts') || fnDisk.endsWith('.m3u8') || fnDisk.endsWith('.key') || fnDisk.endsWith('.keyinfo');
+							const isHlsExtension = fnDisk.endsWith('.ts') || fnDisk.endsWith('.m3u8') || fnDisk.endsWith('.key') || fnDisk.endsWith('.keyinfo') || fnDisk.endsWith('_thumb.jpg') || fnDisk.endsWith('_thumb.png');
 
 							if (isSourceIdMatch || isSourceDiskMatch || isSourceDlMatch || isSourceFullMatch || isMediaExtMatch || !isHlsExtension) {
 								logger.warn(`[transcode-video-operation] (${filename}) ABSOLUTE SAFETY PREVENTED DELETION of non-HLS/source file: fnDisk="${fileRecord?.filename_disk}", id="${fileIdToDelete}"`);
