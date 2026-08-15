@@ -131,7 +131,7 @@ export default {
 			folder_id,
 			process_mode = 'all',
 			keyBaseUrl,
-			playlist_reference_type = 'id',
+			playlist_reference_type = 'filename_disk',
 			qualities = ['240p', '480p', '720p', '1080p', '2160p'],
 			threads = 1,
 			nice,
@@ -872,10 +872,10 @@ export default {
 
 					if (fileId) {
 						if (useFilenameDisk) {
-							// Use filename_disk (the original filename) - only when explicitly requested
-							newLines.push(filename);
+							// Use filename_disk (the original filename) - compatible with CDN / Cloudflare R2
+							newLines.push(basename);
 						} else {
-							// Use file ID (UUID) - this is the default behavior
+							// Use file ID (UUID) - Directus internal /assets/ reference
 							newLines.push(fileId);
 						}
 					} else {
@@ -1918,7 +1918,8 @@ export default {
 			}
 
 			// Determine reference type for playlists
-			const useFilenameDisk = playlist_reference_type === 'filename_disk';
+			// Default to filename_disk (standard HLS format). If using cloud storage (e.g. Cloudflare R2) or storage_adapter === 'r2', always ensure filename_disk is used.
+			const useFilenameDisk = playlist_reference_type === 'filename_disk' || storage_adapter === 'r2' || targetStorageDriver !== 'local' || playlist_reference_type !== 'id';
 			const referenceTypeLabel = useFilenameDisk ? 'filename_disk' : 'file IDs';
 			logger.info(`[transcode-video-operation] (${filename}) Rebuilding playlists with ${referenceTypeLabel}...`);
 

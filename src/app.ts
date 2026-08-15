@@ -104,11 +104,11 @@ export default {
 				interface: 'select-dropdown',
 				options: {
 					choices: [
-						{ text: 'Directus File IDs (default)', value: 'id' },
-						{ text: 'Filename Disk (custom)', value: 'filename_disk' }
+						{ text: 'Filename Disk (standard HLS / CDN compatible, default)', value: 'filename_disk' },
+						{ text: 'Directus File IDs (legacy /assets/:uuid)', value: 'id' }
 					]
 				},
-				note: 'How playlists should reference segments: File UUIDs for files in Directus (/assets/:uuid) or Filename Disk for resources stored in a custom location (/stream/:filename_disk.m3u8)',
+				note: 'How playlists reference segments: "Filename Disk" uses actual filenames (e.g. video_240p_000.ts) compatible with CDN/Cloudflare R2 and standard HLS players. "Directus File IDs" uses Directus UUIDs.',
 				conditions: [
 					{
 						name: 'Hide HLS settings',
@@ -122,7 +122,7 @@ export default {
 				]
 			},
 			schema: {
-				default_value: 'id'
+				default_value: 'filename_disk'
 			}
 		},
 		{
