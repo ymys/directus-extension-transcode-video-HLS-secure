@@ -1449,44 +1449,57 @@ export default {
 
 					const existingFilesToDelete = await filesService.readByQuery({
 						filter: filter,
-						fields: ['id', 'filename_disk', 'filename_download', 'storage', 'type'],
+						fields: ['*'],
 						limit: -1
 					});
 
 					if (existingFilesToDelete && Array.isArray(existingFilesToDelete) && existingFilesToDelete.length > 0) {
-						logger.info(`[transcode-video-operation] (${filename}) Found ${existingFilesToDelete.length} existing HLS file record(s) to delete`);
+						logger.info(`[transcode-video-operation] (${filename}) Found ${existingFilesToDelete.length} potential HLS file record(s) to inspect`);
 						
 						const idsToDelete: string[] = [];
+						const mediaExtensions = ['.mp4', '.mov', '.mkv', '.avi', '.webm', '.flv', '.wmv', '.m4v', '.3gp', '.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac'];
 
-						for (const fileRecord of existingFilesToDelete) {
+						for (const fileRecordRaw of existingFilesToDelete) {
+							let fileRecord = fileRecordRaw;
 							const fileIdToDelete = fileRecord?.id || fileRecord?.data?.id || (typeof fileRecord === 'string' ? fileRecord : null);
-							const fnDisk = fileRecord?.filename_disk || fileIdToDelete;
-							const fnDownload = fileRecord?.filename_download;
+							if (!fileIdToDelete) continue;
 
-							// ABSOLUTE SAFETY CHECK: NEVER delete the source input video file under ANY circumstances!
-							const isMediaFileExt = ['.mp4', '.mov', '.mkv', '.avi', '.webm', '.flv', '.wmv', '.m4v', '.3gp', '.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac'].some(ext => fnDisk.toLowerCase().endsWith(ext));
+							// If filename_disk is missing from the record, read the full record to be 100% sure!
+							if (!fileRecord?.filename_disk && typeof fileIdToDelete === 'string') {
+								try {
+									fileRecord = await filesService.readOne(fileIdToDelete);
+								} catch (readErr) {
+									logger.warn(`[transcode-video-operation] (${filename}) Could not read file record ${fileIdToDelete} for safety inspection, skipping deletion.`);
+									continue;
+								}
+							}
 
-							const isSourceFile = 
-								(sourceFileId && String(fileIdToDelete) === String(sourceFileId)) ||
-								(sourceFileNameDisk && fnDisk.toLowerCase() === sourceFileNameDisk.toLowerCase()) ||
-								(sourceFileNameDownload && fnDisk.toLowerCase() === sourceFileNameDownload.toLowerCase()) ||
-								(fnDownload && sourceFileNameDisk && fnDownload.toLowerCase() === sourceFileNameDisk.toLowerCase()) ||
-								(fnDisk.toLowerCase() === `${filename}.${extension}`.toLowerCase()) ||
-								isMediaFileExt ||
-								(fileRecord?.type && fileObject?.type && fileRecord.type === fileObject.type && !fnDisk.endsWith('.ts') && !fnDisk.endsWith('.m3u8') && !fnDisk.endsWith('.key'));
+							const fnDisk = (fileRecord?.filename_disk || '').toString().toLowerCase();
+							const fnDownload = (fileRecord?.filename_download || '').toString().toLowerCase();
+							const fileIdStr = String(fileIdToDelete).toLowerCase();
+							const srcIdStr = sourceFileId ? String(sourceFileId).toLowerCase() : '';
+							const srcFnDiskStr = sourceFileNameDisk ? String(sourceFileNameDisk).toLowerCase() : '';
+							const srcFnDlStr = sourceFileNameDownload ? String(sourceFileNameDownload).toLowerCase() : '';
+							const fullFilenameExt = `${filename}.${extension}`.toLowerCase();
 
-							if (isSourceFile) {
-								logger.warn(`[transcode-video-operation] (${filename}) ABSOLUTE SAFETY PREVENTED DELETION of source video file: ${fnDisk} (ID: ${fileIdToDelete})`);
+							// Strict checks: Is this a source file or primary media file?
+							const isSourceIdMatch = !!(srcIdStr && fileIdStr === srcIdStr);
+							const isSourceDiskMatch = !!(srcFnDiskStr && fnDisk === srcFnDiskStr);
+							const isSourceDlMatch = !!(srcFnDlStr && fnDisk === srcFnDlStr);
+							const isSourceFullMatch = fnDisk === fullFilenameExt;
+							const isMediaExtMatch = mediaExtensions.some(ext => fnDisk.endsWith(ext) || fnDownload.endsWith(ext));
+							const isHlsExtension = fnDisk.endsWith('.ts') || fnDisk.endsWith('.m3u8') || fnDisk.endsWith('.key') || fnDisk.endsWith('.keyinfo');
+
+							if (isSourceIdMatch || isSourceDiskMatch || isSourceDlMatch || isSourceFullMatch || isMediaExtMatch || !isHlsExtension) {
+								logger.warn(`[transcode-video-operation] (${filename}) ABSOLUTE SAFETY PREVENTED DELETION of non-HLS/source file: fnDisk="${fileRecord?.filename_disk}", id="${fileIdToDelete}"`);
 								continue;
 							}
 
-							if (fileIdToDelete) {
-								idsToDelete.push(String(fileIdToDelete));
-							}
+							idsToDelete.push(String(fileIdToDelete));
 						}
 
 						if (idsToDelete.length > 0) {
-							logger.info(`[transcode-video-operation] (${filename}) Deleting ${idsToDelete.length} existing HLS file record(s) in batch...`);
+							logger.info(`[transcode-video-operation] (${filename}) Confirmed ${idsToDelete.length} verified HLS file record(s) to delete in batch...`);
 							const batchSize = 100;
 							for (let i = 0; i < idsToDelete.length; i += batchSize) {
 								const batch = idsToDelete.slice(i, i + batchSize);
@@ -1505,6 +1518,8 @@ export default {
 									}
 								}
 							}
+						} else {
+							logger.info(`[transcode-video-operation] (${filename}) No valid HLS file records found after safety filtering.`);
 						}
 					} else {
 						logger.info(`[transcode-video-operation] (${filename}) No existing HLS file records found in Directus to delete`);
