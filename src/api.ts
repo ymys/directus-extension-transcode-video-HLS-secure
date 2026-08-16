@@ -1531,12 +1531,20 @@ export default {
 				// Also clean up any local disk HLS files in outputDir matching this video (excluding original source file)
 				if (fs.existsSync(outputDir)) {
 					try {
-						const localFiles = fs.readdirSync(outputDir).filter(fn => 
-							(fn.startsWith(`${filename}_`) || fn === `${filename}.m3u8` || fn === `${filename}.key`) && 
-							fn !== fileObject.filename_disk && 
-							fn !== fileObject.filename_download &&
-							fn !== `${filename}.${extension}`
-						);
+						const mediaExts = ['.mp4', '.mov', '.mkv', '.avi', '.webm', '.flv', '.wmv', '.m4v', '.3gp', '.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac'];
+						const localFiles = fs.readdirSync(outputDir).filter(fn => {
+							const fnLower = fn.toLowerCase();
+							const isMediaExt = mediaExts.some(ext => fnLower.endsWith(ext));
+							if (isMediaExt) return false;
+
+							const isHlsExt = fnLower.endsWith('.ts') || fnLower.endsWith('.m3u8') || fnLower.endsWith('.key') || fnLower.endsWith('.keyinfo') || fnLower.endsWith('_thumb.jpg') || fnLower.endsWith('_thumb.png');
+							if (!isHlsExt) return false;
+
+							return (fnLower.startsWith(`${filename.toLowerCase()}_`) || fnLower === `${filename.toLowerCase()}.m3u8` || fnLower === `${filename.toLowerCase()}.key`) && 
+								fnLower !== fileObject.filename_disk.toLowerCase() && 
+								fnLower !== (fileObject.filename_download || '').toLowerCase() &&
+								fnLower !== `${filename.toLowerCase()}.${extension.toLowerCase()}`;
+						});
 						for (const fn of localFiles) {
 							const localPath = path.join(outputDir, fn);
 							try {
@@ -1551,6 +1559,57 @@ export default {
 					} catch (readdirErr) {
 						logger.warn(`[transcode-video-operation] (${filename}) Error reading local directory for cleanup:`, readdirErr);
 					}
+				}
+			}
+
+			// --- AUTOMATIC RE-FETCH GUARD: Verify source file is physically present on disk before ffprobe/ffmpeg ---
+			if (!filePath || !fs.existsSync(filePath)) {
+				logger.warn(`[transcode-video-operation] (${filename}) Source file missing on disk (${filePath}), re-downloading via Directus assets API...`);
+				try {
+					let fileId: string | null = null;
+					if (typeof file === 'string') {
+						fileId = file;
+					} else if (fileObject.id) {
+						fileId = String(fileObject.id);
+					} else if ((fileObject as any).data?.id) {
+						fileId = String((fileObject as any).data.id);
+					}
+
+					if (fileId) {
+						const tempDir = path.join(process.env.PWD || '/directus', 'tmp', 'transcode');
+						if (!fs.existsSync(tempDir)) {
+							fs.mkdirSync(tempDir, { recursive: true, mode: 0o755 });
+						}
+						const tempFilePath = path.join(tempDir, `${fileId}_${fileObject.filename_disk}`);
+						const assetUrl = `${baseUrl}/assets/${fileId}`;
+
+						logger.info(`[transcode-video-operation] (${filename}) Re-downloading source file from ${assetUrl} to ${tempFilePath}...`);
+
+						await new Promise<void>((resolve, reject) => {
+							const protocol = assetUrl.startsWith('https') ? https : http;
+							const request = protocol.get(assetUrl, (response) => {
+								if (response.statusCode !== 200) {
+									reject(new Error(`Failed to download file: HTTP ${response.statusCode}`));
+									return;
+								}
+								const writeStream = fs.createWriteStream(tempFilePath);
+								response.pipe(writeStream);
+								writeStream.on('finish', () => {
+									writeStream.close();
+									resolve();
+								});
+								writeStream.on('error', reject);
+							});
+							request.on('error', reject);
+						});
+
+						filePath = tempFilePath;
+						tempSourceFile = tempFilePath;
+						needsCleanup = true;
+						logger.info(`[transcode-video-operation] (${filename}) Source file re-downloaded successfully to: ${filePath}`);
+					}
+				} catch (reDownloadErr) {
+					logger.error(`[transcode-video-operation] (${filename}) Error re-downloading source file:`, reDownloadErr);
 				}
 			}
 
