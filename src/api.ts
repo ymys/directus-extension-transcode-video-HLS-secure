@@ -54,6 +54,7 @@ interface OperationInput {
 	keyBaseUrl?: string;
 	playlist_reference_type?: 'id' | 'filename_disk';
 	qualities?: string[] | string;
+	prevent_upscale?: boolean;
 	threads?: number | string;
 	nice?: number | string;
 	storage_adapter?: 'default' | 'source' | 'r2' | 'custom';
@@ -133,6 +134,7 @@ export default {
 			keyBaseUrl,
 			playlist_reference_type = 'filename_disk',
 			qualities = ['240p', '480p', '720p', '1080p', '2160p'],
+			prevent_upscale = true,
 			threads = 1,
 			nice,
 			storage_adapter = 'default',
@@ -1733,19 +1735,23 @@ export default {
 			// Filter qualities: first by user selection, then by source resolution (prevent upscaling)
 			qualitiesRaw = allQualitiesRaw.filter(quality => selectedQualitiesNumbers.includes(quality.id));
 
-			// Filter out qualities that would require upscaling
-			const qualitiesBeforeFilter = qualitiesRaw.length;
-			qualitiesRaw = qualitiesRaw.filter(quality => {
-				const targetHeight = qualityHeights[quality.id];
-				if (targetHeight && targetHeight > sourceHeight) {
-					logger.info(`[transcode-video-operation] (${filename}) Skipping ${quality.id}p (target: ${targetHeight}px, source: ${sourceHeight}px) to prevent upscaling`);
-					return false;
-				}
-				return true;
-			});
+			// Filter out qualities that would require upscaling if prevent_upscale is enabled
+			if (prevent_upscale) {
+				const qualitiesBeforeFilter = qualitiesRaw.length;
+				qualitiesRaw = qualitiesRaw.filter(quality => {
+					const targetHeight = qualityHeights[quality.id];
+					if (targetHeight && targetHeight > sourceHeight) {
+						logger.info(`[transcode-video-operation] (${filename}) Skipping ${quality.id}p (target: ${targetHeight}px, source: ${sourceHeight}px) to prevent upscaling`);
+						return false;
+					}
+					return true;
+				});
 
-			if (qualitiesBeforeFilter > qualitiesRaw.length) {
-				logger.info(`[transcode-video-operation] (${filename}) Filtered out ${qualitiesBeforeFilter - qualitiesRaw.length} quality level(s) that would require upscaling`);
+				if (qualitiesBeforeFilter > qualitiesRaw.length) {
+					logger.info(`[transcode-video-operation] (${filename}) Filtered out ${qualitiesBeforeFilter - qualitiesRaw.length} quality level(s) that would require upscaling (source height: ${sourceHeight}px)`);
+				}
+			} else {
+				logger.info(`[transcode-video-operation] (${filename}) prevent_upscale is disabled. Transcoding all selected qualities regardless of source height (${sourceHeight}px).`);
 			}
 
 			logger.info(`[transcode-video-operation] (${filename}) Selected qualities: ${selectedQualitiesNumbers.join(', ')}`);

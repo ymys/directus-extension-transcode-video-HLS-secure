@@ -158,6 +158,30 @@ export default {
 			}
 		},
 		{
+			field: 'prevent_upscale',
+			name: 'Prevent Upscaling',
+			type: 'boolean',
+			meta: {
+				width: 'half',
+				interface: 'boolean',
+				note: 'If enabled (default), automatically skips quality levels higher than input video height (e.g. skips 480p/720p/1080p if source video is 360p). Turn OFF to force upscale to all selected resolutions.',
+				conditions: [
+					{
+						name: 'Hide HLS settings',
+						rule: {
+							process_mode: {
+								_in: ['audio_only', 'transcription_only']
+							}
+						},
+						hidden: true
+					}
+				]
+			},
+			schema: {
+				default_value: true
+			}
+		},
+		{
 			field: 'storage_adapter',
 			name: 'Storage Adapter',
 			type: 'string',
