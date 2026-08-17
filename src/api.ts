@@ -1186,132 +1186,159 @@ export default {
 			}
 		}
 
-		// Handle source file location (local vs cloud storage)
+		// Helper function to safely stream source file from Directus (via FilesService stream or AssetsService or HTTP with auth)
+		const downloadSourceFileStream = async (fileId: string, destPath: string): Promise<void> => {
+			// 1. Try FilesService.getStream(fileId) directly
+			try {
+				const { FilesService } = services;
+				const fsService = new FilesService({ schema: await getSchema(), accountability });
+				if (typeof (fsService as any).getStream === 'function') {
+					const readStream = await (fsService as any).getStream(fileId);
+					const writeStream = fs.createWriteStream(destPath);
+					await new Promise<void>((resolve, reject) => {
+						readStream.pipe(writeStream);
+						writeStream.on('finish', () => { writeStream.close(); resolve(); });
+						writeStream.on('error', reject);
+						readStream.on('error', reject);
+					});
+					logger.info(`[transcode-video-operation] (${filename}) Source stream retrieved via FilesService.getStream`);
+					return;
+				}
+			} catch (err) {
+				logger.warn(`[transcode-video-operation] (${filename}) FilesService.getStream failed, trying AssetsService fallback:`, err instanceof Error ? err.message : String(err));
+			}
+
+			// 2. Try AssetsService.getAsset(fileId)
+			try {
+				const { AssetsService } = services;
+				const assetsService = new AssetsService({ schema: await getSchema(), accountability });
+				const asset = await assetsService.getAsset(fileId, {});
+				if (asset && asset.stream) {
+					const writeStream = fs.createWriteStream(destPath);
+					await new Promise<void>((resolve, reject) => {
+						asset.stream.pipe(writeStream);
+						writeStream.on('finish', () => { writeStream.close(); resolve(); });
+						writeStream.on('error', reject);
+						asset.stream.on('error', reject);
+					});
+					logger.info(`[transcode-video-operation] (${filename}) Source stream retrieved via AssetsService.getAsset`);
+					return;
+				}
+			} catch (err) {
+				logger.warn(`[transcode-video-operation] (${filename}) AssetsService.getAsset failed, trying authenticated HTTP request:`, err instanceof Error ? err.message : String(err));
+			}
+
+			// 3. Fallback to HTTP download with Authorization token header
+			const assetUrl = `${baseUrl}/assets/${fileId}`;
+			const headers: Record<string, string> = {};
+			if (accountability && (accountability as any).token) {
+				headers['Authorization'] = `Bearer ${(accountability as any).token}`;
+			}
+
+			logger.info(`[transcode-video-operation] (${filename}) Downloading source file via HTTP from ${assetUrl}...`);
+
+			await new Promise<void>((resolve, reject) => {
+				try {
+					new URL(assetUrl);
+				} catch (urlError) {
+					reject(new Error(`Invalid asset URL: ${assetUrl}`));
+					return;
+				}
+
+				const protocol = assetUrl.startsWith('https') ? https : http;
+				const parsedUrl = new URL(assetUrl);
+				const reqOpts = {
+					protocol: parsedUrl.protocol,
+					hostname: parsedUrl.hostname,
+					port: parsedUrl.port,
+					path: parsedUrl.pathname + parsedUrl.search,
+					headers: headers
+				};
+
+				const request = protocol.get(reqOpts, (response: any) => {
+					if (response.statusCode !== 200) {
+						reject(new Error(`Failed to download file: HTTP ${response.statusCode}`));
+						return;
+					}
+					const writeStream = fs.createWriteStream(destPath);
+					response.pipe(writeStream);
+					writeStream.on('finish', () => { writeStream.close(); resolve(); });
+					writeStream.on('error', reject);
+				});
+				request.on('error', reject);
+			});
+		};
+
+		// Handle source file location: ALWAYS copy or download to an isolated temporary workspace directory!
+		// This guarantees that any DB purge or external deletion of local uploads will NEVER touch or destroy our active source file!
 		let filePath: string = '';
 		let tempSourceFile: string | null = null;
 		let needsCleanup = false;
 
-		// Check storage driver to determine if file is local or cloud storage
 		const sourceStorageDriver = getStorageDriver(fileObject.storage);
 		const isLocalSource = sourceStorageDriver === 'local';
 
-		let isFileAvailableOnDisk = false;
+		// Get file ID from fileObject
+		let fileId: string | null = null;
+		if (typeof file === 'string') {
+			fileId = file;
+		} else if (fileObject.id) {
+			fileId = String(fileObject.id);
+		} else if ((fileObject as any).data?.id) {
+			fileId = String((fileObject as any).data.id);
+		}
+
+		// Create temporary workspace directory for source file isolation
+		const tempDir = path.join(process.env.PWD || '/directus', 'tmp', 'transcode');
+		if (!fs.existsSync(tempDir)) {
+			try {
+				fs.mkdirSync(tempDir, { recursive: true, mode: 0o755 });
+			} catch (mkdirErr) {
+				logger.warn(`[transcode-video-operation] (${filename}) Could not create tempDir ${tempDir}:`, mkdirErr);
+			}
+		}
+
+		const isolatedSourcePath = path.join(tempDir, `source_${Date.now()}_${fileId || filename}.${extension || 'mp4'}`);
+
+		let sourcePrepared = false;
 
 		if (isLocalSource) {
-			// Local storage: check if file is physically on disk
 			const storagePath = resolveStorage(fileObject.storage);
 			if (storagePath) {
 				const basePath = process.env.PWD || '/directus';
 				const candidatePath = path.join(basePath, `${storagePath}/${fileObject.filename_disk}`);
 				if (fs.existsSync(candidatePath)) {
-					filePath = candidatePath;
-					isFileAvailableOnDisk = true;
-				} else {
-					logger.warn(`[transcode-video-operation] (${filename}) Local storage path missing on disk (${candidatePath}), falling back to downloading via Directus assets API...`);
+					try {
+						// Copy physical local file to isolated workspace
+						fs.copyFileSync(candidatePath, isolatedSourcePath);
+						filePath = isolatedSourcePath;
+						tempSourceFile = isolatedSourcePath;
+						needsCleanup = true;
+						sourcePrepared = true;
+						logger.info(`[transcode-video-operation] (${filename}) Copied local source file to isolated temporary workspace: ${isolatedSourcePath}`);
+					} catch (copyErr) {
+						logger.warn(`[transcode-video-operation] (${filename}) Failed to copy local file to isolated workspace, using candidate path:`, copyErr);
+						filePath = candidatePath;
+						sourcePrepared = true;
+					}
 				}
 			}
 		}
 
-		if (!isFileAvailableOnDisk) {
-			// Cloud storage OR local file not found on disk: download via Directus assets endpoint
-			logger.info(`[transcode-video-operation] (${filename}) Source file is in cloud storage or not found on local disk (${fileObject.storage}, driver: ${sourceStorageDriver}), downloading to temporary location via Directus assets API...`);
+		if (!sourcePrepared && fileId) {
 			try {
-				// Get file ID from fileObject - try multiple possible locations
-				let fileId: string | null = null;
-				if (typeof file === 'string') {
-					fileId = file;
-				} else if (fileObject.id) {
-					fileId = String(fileObject.id);
-				} else if ((fileObject as any).data?.id) {
-					fileId = String((fileObject as any).data.id);
-				}
-
-				if (!fileId) {
-					logger.error(`[transcode-video-operation] (${filename}) Cannot download source file: file ID not found. fileObject keys: ${Object.keys(fileObject).join(', ')}`);
-					return {
-						error: `Cannot download source file: file ID not found in fileObject`
-					};
-				}
-
-				// Create temporary directory for downloaded file
-				const tempDir = path.join(process.env.PWD || '/directus', 'tmp', 'transcode');
-				if (!fs.existsSync(tempDir)) {
-					try {
-						fs.mkdirSync(tempDir, { recursive: true, mode: 0o755 });
-					} catch (error) {
-						const errorMessage = error instanceof Error ? error.message : String(error);
-						logger.error(`[transcode-video-operation] (${filename}) Failed to create temp directory ${tempDir}: ${errorMessage}`);
-						// If it's a permission error and the directory exists (race condition), continue
-						if (errorMessage.includes('EACCES') || errorMessage.includes('permission denied')) {
-							if (fs.existsSync(tempDir)) {
-								logger.warn(`[transcode-video-operation] (${filename}) Temp directory exists but has permission issues. Continuing anyway.`);
-							} else {
-								return {
-									error: `Permission denied creating temp directory ${tempDir}. Please ensure the directory exists on the host with proper permissions (chmod 755) or run: mkdir -p ./tmp && chmod 755 ./tmp`
-								};
-							}
-						} else {
-							return {
-								error: `Failed to create temp directory ${tempDir}: ${errorMessage}`
-							};
-						}
-					}
-				}
-
-				// Download file to temporary location using HTTP request to Directus assets endpoint
-				// This works for all storage types (local, S3, GCS, R2, etc.)
-				const tempFilePath = path.join(tempDir, `${fileId}_${fileObject.filename_disk}`);
-				tempSourceFile = tempFilePath;
-
-				if (!fileId || typeof fileId !== 'string' || fileId.trim() === '') {
-					logger.error(`[transcode-video-operation] (${filename}) Invalid fileId: ${fileId}`);
-					return {
-						error: `Invalid file ID: ${fileId}`
-					};
-				}
-
-				const assetUrl = `${baseUrl}/assets/${fileId}`;
-
-				logger.info(`[transcode-video-operation] (${filename}) Downloading source file from ${assetUrl}...`);
-
-				await new Promise<void>((resolve, reject) => {
-					// Validate URL before making request
-					try {
-						new URL(assetUrl);
-					} catch (urlError) {
-						reject(new Error(`Invalid asset URL: ${assetUrl}. Error: ${urlError instanceof Error ? urlError.message : String(urlError)}`));
-						return;
-					}
-
-					const protocol = assetUrl.startsWith('https') ? https : http;
-					const request = protocol.get(assetUrl, (response) => {
-						if (response.statusCode !== 200) {
-							reject(new Error(`Failed to download file: HTTP ${response.statusCode}`));
-							return;
-						}
-						const writeStream = fs.createWriteStream(tempFilePath);
-						response.pipe(writeStream);
-						writeStream.on('finish', () => {
-							writeStream.close();
-							resolve();
-						});
-						writeStream.on('error', reject);
-					});
-					request.on('error', reject);
-				});
-
-				filePath = tempSourceFile;
+				logger.info(`[transcode-video-operation] (${filename}) Fetching source file stream to isolated temporary workspace: ${isolatedSourcePath}`);
+				await downloadSourceFileStream(fileId, isolatedSourcePath);
+				filePath = isolatedSourcePath;
+				tempSourceFile = isolatedSourcePath;
 				needsCleanup = true;
-				logger.info(`[transcode-video-operation] (${filename}) Source file downloaded successfully to: ${filePath}`);
-			} catch (error) {
-				const errorMessage = error instanceof Error ? error.message : String(error);
-				const errorStack = error instanceof Error ? error.stack : undefined;
-				logger.error(`[transcode-video-operation] (${filename}) Error downloading source file from Directus assets API: ${errorMessage}`);
-				if (errorStack) {
-					logger.error(`[transcode-video-operation] (${filename}) Error stack: ${errorStack}`);
-				}
+				sourcePrepared = true;
+				logger.info(`[transcode-video-operation] (${filename}) Source file stream fetched successfully to: ${filePath}`);
+			} catch (dlErr) {
+				const errorMessage = dlErr instanceof Error ? dlErr.message : String(dlErr);
+				logger.error(`[transcode-video-operation] (${filename}) Error fetching source file: ${errorMessage}`);
 				return {
-					error: `Failed to download source file from Directus assets API: ${errorMessage}`
+					error: `Failed to fetch source file: ${errorMessage}`
 				};
 			}
 		}
