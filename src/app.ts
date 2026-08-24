@@ -57,6 +57,7 @@ export default {
 				options: {
 					choices: [
 						{ text: 'Full Transcode & Transcription (default)', value: 'all' },
+						{ text: 'Process HLS and mono audio (mp3 mono)', value: 'hls_and_audio' },
 						{ text: 'Process only HLS from existing video', value: 'hls_only' },
 						{ text: 'Process to mono audio only (mp3 mono) from existing video', value: 'audio_only' },
 						{ text: 'Process to transcript only from existing mp3 mono', value: 'transcription_only' }
@@ -307,6 +308,79 @@ export default {
 			},
 			schema: {
 				required: false
+			}
+		},
+		{
+			field: 'audio_storage_adapter',
+			name: 'Audio Storage Location',
+			type: 'string',
+			meta: {
+				width: 'half',
+				interface: 'select-radio',
+				options: {
+					choices: [
+						{ text: 'Save Audio in Directus (Local/Default Storage)', value: 'directus' },
+						{ text: 'Same as HLS Target Storage', value: 'target' },
+						{ text: 'Other Custom Location', value: 'custom' }
+					]
+				},
+				note: 'Where generated mp3 mono audio files should be stored.',
+				conditions: [
+					{
+						name: 'Hide when audio extraction is not run',
+						rule: {
+							process_mode: {
+								_in: ['hls_only', 'transcription_only']
+							}
+						},
+						hidden: true
+					}
+				]
+			},
+			schema: {
+				default_value: 'directus'
+			}
+		},
+		{
+			field: 'audio_target_storage',
+			name: 'Audio Custom Storage Location',
+			type: 'text',
+			meta: {
+				width: 'half',
+				interface: 'input',
+				options: {
+					placeholder: 'e.g., local, s3, r2'
+				},
+				note: 'Specify the custom storage location name for generated mp3 audio files.',
+				conditions: [
+					{
+						name: 'Hide when audio_storage_adapter is not custom',
+						rule: {
+							_or: [
+								{ audio_storage_adapter: { _eq: 'directus' } },
+								{ audio_storage_adapter: { _eq: 'target' } },
+								{ audio_storage_adapter: { _null: true } }
+							]
+						},
+						hidden: true
+					}
+				]
+			},
+			schema: {
+				required: false
+			}
+		},
+		{
+			field: 'delete_source_file',
+			name: 'Delete Original Source File',
+			type: 'boolean',
+			meta: {
+				width: 'half',
+				interface: 'boolean',
+				note: 'If enabled, the original source video file (.mp4) will be deleted from Directus database and storage after transcoding completes. Default: disabled (leave source file intact).'
+			},
+			schema: {
+				default_value: false
 			}
 		},
 		{

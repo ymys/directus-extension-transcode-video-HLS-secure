@@ -50,7 +50,7 @@ interface File {
 interface OperationInput {
 	file: File | string;
 	folder_id?: string;
-	process_mode?: 'all' | 'hls_only' | 'audio_only' | 'transcription_only';
+	process_mode?: 'all' | 'hls_only' | 'hls_and_audio' | 'audio_only' | 'transcription_only';
 	keyBaseUrl?: string;
 	playlist_reference_type?: 'id' | 'filename_disk';
 	qualities?: string[] | string;
@@ -61,6 +61,9 @@ interface OperationInput {
 	target_storage?: string;
 	key_storage_adapter?: 'directus' | 'target' | 'custom';
 	key_target_storage?: string;
+	audio_storage_adapter?: 'directus' | 'target' | 'custom';
+	audio_target_storage?: string;
+	delete_source_file?: boolean;
 	delete_existing_hls?: boolean;
 	generate_captions?: boolean;
 	caption_language?: string;
@@ -141,6 +144,9 @@ export default {
 			target_storage,
 			key_storage_adapter = 'directus',
 			key_target_storage,
+			audio_storage_adapter = 'directus',
+			audio_target_storage,
+			delete_source_file = false,
 			delete_existing_hls = false,
 			generate_captions = false,
 			caption_language,
@@ -1434,7 +1440,7 @@ export default {
 		const uploadedFiles: UploadedFile[] = [];
 		let qualitiesRaw: any[] = [];
 
-		if (process_mode === 'all' || process_mode === 'hls_only') {
+		if (process_mode === 'all' || process_mode === 'hls_only' || process_mode === 'hls_and_audio') {
 			if (delete_existing_hls) {
 				logger.info(`[transcode-video-operation] (${filename}) delete_existing_hls is enabled. Purging all existing HLS files from Directus database and storage...`);
 				try {
@@ -2171,7 +2177,7 @@ export default {
 		let runAudioExtraction = false;
 		if (process_mode === 'all' && (generate_captions || generate_speech2text)) {
 			runAudioExtraction = true;
-		} else if (process_mode === 'audio_only') {
+		} else if (process_mode === 'audio_only' || process_mode === 'hls_and_audio') {
 			runAudioExtraction = true;
 		} else if (process_mode === 'transcription_only' && !isAudioInput) {
 			runAudioExtraction = true;
@@ -2186,7 +2192,7 @@ export default {
 				tempAudioPath = path.join(tempDir, `${filename}_temp_audio.mp3`);
 
 				let forceMono = false;
-				if (process_mode === 'audio_only') {
+				if (process_mode === 'audio_only' || process_mode === 'hls_and_audio') {
 					forceMono = true;
 				} else if (process_mode === 'transcription_only') {
 					forceMono = true;
@@ -2238,30 +2244,62 @@ export default {
 
 		if (tempAudioPath && fs.existsSync(tempAudioPath)) {
 			const shouldSaveAudioPermanently = (process_mode === 'audio_only') ||
+				(process_mode === 'hls_and_audio') ||
 				(process_mode === 'all' && generate_speech2text) ||
 				(process_mode === 'transcription_only' && !isAudioInput);
 
 			if (shouldSaveAudioPermanently) {
 				try {
-					const audioFilename = `${filename}_audio.mp3`;
-					const permanentAudioPath = path.join(outputDir, audioFilename);
+					const audioFilename = `${filename}_mono.mp3`;
+					let audioUploadPath = tempAudioPath;
 
-					// Copy/move temporary audio to outputDir
-					if (tempAudioPath !== permanentAudioPath) {
-						fs.copyFileSync(tempAudioPath, permanentAudioPath);
+					// Resolve audioStorageAdapter
+					let audioStorageAdapter: string;
+					if (audio_storage_adapter === 'target') {
+						audioStorageAdapter = targetStorageAdapter;
+					} else if (audio_storage_adapter === 'custom' && audio_target_storage) {
+						if (!validateStorageExists(audio_target_storage)) {
+							throw new Error(`Custom audio storage location "${audio_target_storage}" does not exist in Directus configuration.`);
+						}
+						audioStorageAdapter = audio_target_storage;
+					} else {
+						audioStorageAdapter = defaultStorageAdapter;
 					}
-					logger.info(`[transcode-video-operation] (${filename}) Permanent audio file saved locally: ${permanentAudioPath}`);
 
-					// Upload audio to Directus
-					logger.info(`[transcode-video-operation] (${filename}) Uploading permanent audio to Directus folder...`);
-					audioId = await uploadFileToDirectus(permanentAudioPath, targetFolderId, {
-						mimetype: 'audio/mpeg'
+					const audioStorageDriver = getStorageDriver(audioStorageAdapter);
+					if (audioStorageDriver === 'local') {
+						const audioStorageRoot = resolveStorage(audioStorageAdapter);
+						if (audioStorageRoot) {
+							const basePath = process.env.PWD || '/directus';
+							const targetAudioStorageDir = path.join(basePath, audioStorageRoot);
+							if (!fs.existsSync(targetAudioStorageDir)) {
+								try {
+									fs.mkdirSync(targetAudioStorageDir, { recursive: true, mode: 0o755 });
+								} catch (dirErr) {
+									logger.warn(`[transcode-video-operation] (${filename}) Could not create audio storage dir ${targetAudioStorageDir}:`, dirErr);
+								}
+							}
+							const targetAudioPath = path.join(targetAudioStorageDir, audioFilename);
+							try {
+								fs.copyFileSync(tempAudioPath, targetAudioPath);
+								audioUploadPath = targetAudioPath;
+								logger.info(`[transcode-video-operation] (${filename}) Saved mono mp3 audio to local storage root: ${targetAudioPath}`);
+							} catch (copyAudioErr) {
+								logger.warn(`[transcode-video-operation] (${filename}) Could not copy audio to local storage root ${targetAudioPath}:`, copyAudioErr);
+							}
+						}
+					}
+
+					logger.info(`[transcode-video-operation] (${filename}) Uploading permanent mono mp3 audio to audio storage: ${audioStorageAdapter}...`);
+					audioId = await uploadFileToDirectus(audioUploadPath, targetFolderId, {
+						mimetype: 'audio/mpeg',
+						storage: audioStorageAdapter
 					});
 
 					if (audioId) {
 						fileIdMap[audioFilename] = audioId;
 						uploadedFiles.push({ filename_disk: audioFilename, id: audioId });
-						logger.info(`[transcode-video-operation] (${filename}) Permanent audio uploaded successfully. ID: ${audioId}`);
+						logger.info(`[transcode-video-operation] (${filename}) Permanent mono mp3 audio uploaded/registered successfully. ID: ${audioId}`);
 					} else {
 						throw new Error("Failed to upload permanent audio file to Directus");
 					}
@@ -2579,6 +2617,19 @@ export default {
 				if (fs.existsSync(qualityFile)) {
 					availableQualities.push(quality.id);
 				}
+			}
+		}
+
+		// Delete original source file if delete_source_file option is enabled
+		if (delete_source_file && targetFileId) {
+			try {
+				logger.info(`[transcode-video-operation] (${filename}) delete_source_file is enabled. Deleting original source file record (ID: ${targetFileId})...`);
+				const { FilesService } = services;
+				const filesService = new FilesService({ schema: await getSchema() });
+				await filesService.deleteOne(targetFileId);
+				logger.info(`[transcode-video-operation] (${filename}) Original source file deleted successfully.`);
+			} catch (deleteSourceErr) {
+				logger.error(`[transcode-video-operation] (${filename}) Could not delete original source file ${targetFileId}:`, deleteSourceErr);
 			}
 		}
 

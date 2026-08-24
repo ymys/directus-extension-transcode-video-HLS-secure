@@ -2,7 +2,7 @@
 	"name": "directus-extension-transcode-video-hls-secure",
 	"description": "Transcode uploaded videos to adaptive HLS streams with multiple quality levels (240p, 480p, 720p, 1080p, 4K)",
 	"icon": "extension",
-	"version": "4.35.0",
+	"version": "4.36.0",
 	"license": "MIT",
 	"keywords": [
 		"directus",
