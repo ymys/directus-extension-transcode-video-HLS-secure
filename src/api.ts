@@ -410,6 +410,10 @@ export default {
 
 		logger.info(`[transcode-video-operation] (${filename}) Using key storage adapter: ${keyStorageAdapter}`);
 
+		if (keyStorageAdapter !== targetStorageAdapter && !keyBaseUrl) {
+			logger.warn(`[transcode-video-operation] (${filename}) NOTICE: Key storage (${keyStorageAdapter}) differs from target HLS storage (${targetStorageAdapter}). HLS players reading playlists from ${targetStorageAdapter} will look for the .key file on ${targetStorageAdapter}. Set "Key Storage Adapter" to "Same as HLS Target Storage" (target) OR configure "Key Base URL" to your Directus assets domain so players can find the key!`);
+		}
+
 		// Determine target storage driver early (used for output directory and cleanup)
 		const targetStorageDriver = getStorageDriver(targetStorageAdapter);
 		const isLocalTarget = targetStorageDriver === 'local';
