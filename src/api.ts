@@ -665,11 +665,13 @@ export default {
 				}
 
 				const fileSizeInBytes = fs.statSync(filePath).size;
-				const isLocalStorage = targetStorageDriver === 'local';
+				const storage = options.storage || targetStorageAdapter;
+				const fileStorageDriver = getStorageDriver(storage);
+				const isFileLocalStorage = fileStorageDriver === 'local';
 
 				// Only log for cloud storage uploads, not for local storage registration
-				if (!isLocalStorage) {
-					logger.info(`[transcode-video-operation] (${filename}) Uploading file: ${fileName} (${fileSizeInBytes} bytes) to storage: ${targetStorageAdapter}`);
+				if (!isFileLocalStorage) {
+					logger.info(`[transcode-video-operation] (${filename}) Uploading file: ${fileName} (${fileSizeInBytes} bytes) to storage: ${storage}`);
 				}
 
 				const types: Record<string, string> = {
@@ -680,7 +682,6 @@ export default {
 					m3u8: "application/x-mpegurl"
 				};
 
-				const storage = options.storage || targetStorageAdapter;
 				const mimetype = options.mimetype || types[extension] || 'application/octet-stream';
 
 				// Check if file already exists in Directus
@@ -1950,16 +1951,43 @@ export default {
 				}
 			}
 
-			// --- Upload HLS Encryption Key ---
+			// --- Upload / Persist HLS Encryption Key ---
 			if (fs.existsSync(keyFileLocalPath)) {
 				try {
-					logger.info(`[transcode-video-operation] (${filename}) Uploading HLS encryption key: ${keyFilename} to key storage: ${keyStorageAdapter}`);
-					const keyId = await uploadFileToDirectus(keyFileLocalPath, targetFolderId, {
+					let keyUploadPath = keyFileLocalPath;
+					const keyStorageDriver = getStorageDriver(keyStorageAdapter);
+
+					if (keyStorageDriver === 'local') {
+						const keyStorageRoot = resolveStorage(keyStorageAdapter);
+						if (keyStorageRoot) {
+							const basePath = process.env.PWD || '/directus';
+							const targetKeyStorageDir = path.join(basePath, keyStorageRoot);
+							if (!fs.existsSync(targetKeyStorageDir)) {
+								try {
+									fs.mkdirSync(targetKeyStorageDir, { recursive: true, mode: 0o755 });
+								} catch (dirErr) {
+									logger.warn(`[transcode-video-operation] (${filename}) Could not create key storage dir ${targetKeyStorageDir}:`, dirErr);
+								}
+							}
+							const targetKeyPath = path.join(targetKeyStorageDir, keyFilename);
+							try {
+								fs.copyFileSync(keyFileLocalPath, targetKeyPath);
+								keyUploadPath = targetKeyPath;
+								logger.info(`[transcode-video-operation] (${filename}) Saved encryption key to local storage root: ${targetKeyPath}`);
+							} catch (copyKeyErr) {
+								logger.warn(`[transcode-video-operation] (${filename}) Could not copy key to local storage root ${targetKeyPath}:`, copyKeyErr);
+							}
+						}
+					}
+
+					logger.info(`[transcode-video-operation] (${filename}) Registering/Uploading HLS encryption key: ${keyFilename} to key storage: ${keyStorageAdapter}`);
+					const keyId = await uploadFileToDirectus(keyUploadPath, targetFolderId, {
 						mimetype: 'application/octet-stream',
 						storage: keyStorageAdapter
 					});
 					fileIdMap[keyFilename] = keyId;
 					uploadedFiles.push({ filename_disk: keyFilename, id: keyId });
+					logger.info(`[transcode-video-operation] (${filename}) HLS encryption key successfully saved to storage (${keyStorageAdapter}) with File ID: ${keyId} (filename: ${keyFilename})`);
 				} catch (error) {
 					logger.error(`[transcode-video-operation] (${filename}) Error uploading HLS key ${keyFilename}:`, error);
 				}
