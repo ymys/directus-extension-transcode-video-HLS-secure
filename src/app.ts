@@ -59,6 +59,7 @@ export default {
 						{ text: 'Full Transcode & Transcription (default)', value: 'all' },
 						{ text: 'Process HLS and mono audio (mp3 mono)', value: 'hls_and_audio' },
 						{ text: 'Process only HLS from existing video', value: 'hls_only' },
+						{ text: 'Generate & Sync .key file only', value: 'key_only' },
 						{ text: 'Process to mono audio only (mp3 mono) from existing video', value: 'audio_only' },
 						{ text: 'Process to transcript only from existing mp3 mono', value: 'transcription_only' }
 					]

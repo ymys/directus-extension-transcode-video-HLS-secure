@@ -50,7 +50,7 @@ interface File {
 interface OperationInput {
 	file: File | string;
 	folder_id?: string;
-	process_mode?: 'all' | 'hls_only' | 'hls_and_audio' | 'audio_only' | 'transcription_only';
+	process_mode?: 'all' | 'hls_only' | 'hls_and_audio' | 'key_only' | 'audio_only' | 'transcription_only';
 	keyBaseUrl?: string;
 	playlist_reference_type?: 'id' | 'filename_disk';
 	qualities?: string[] | string;
@@ -1439,6 +1439,75 @@ export default {
 		const fileIdMap: Record<string, string> = {};
 		const uploadedFiles: UploadedFile[] = [];
 		let qualitiesRaw: any[] = [];
+
+		if (process_mode === 'key_only') {
+			logger.info(`[transcode-video-operation] (${filename}) Running in key_only mode. Syncing/registering .key file...`);
+
+			// Ensure local key path exists or create a 16-byte key if missing
+			if (!fs.existsSync(keyFileLocalPath)) {
+				const keyStorageRoot = resolveStorage(keyStorageAdapter);
+				const basePath = process.env.PWD || '/directus';
+				const localKeyRootPath = keyStorageRoot ? path.join(basePath, keyStorageRoot, keyFilename) : null;
+
+				if (localKeyRootPath && fs.existsSync(localKeyRootPath)) {
+					fs.mkdirSync(path.dirname(keyFileLocalPath), { recursive: true });
+					fs.copyFileSync(localKeyRootPath, keyFileLocalPath);
+					logger.info(`[transcode-video-operation] (${filename}) Found existing key in local storage root: ${localKeyRootPath}`);
+				} else {
+					const encryptionKey = crypto.randomBytes(16);
+					fs.mkdirSync(path.dirname(keyFileLocalPath), { recursive: true });
+					fs.writeFileSync(keyFileLocalPath, encryptionKey);
+					logger.info(`[transcode-video-operation] (${filename}) Generated new 16-byte HLS encryption key: ${keyFileLocalPath}`);
+				}
+			}
+
+			if (fs.existsSync(keyFileLocalPath)) {
+				let keyUploadPath = keyFileLocalPath;
+				const keyStorageDriver = getStorageDriver(keyStorageAdapter);
+
+				if (keyStorageDriver === 'local') {
+					const keyStorageRoot = resolveStorage(keyStorageAdapter);
+					if (keyStorageRoot) {
+						const basePath = process.env.PWD || '/directus';
+						const targetKeyStorageDir = path.join(basePath, keyStorageRoot);
+						if (!fs.existsSync(targetKeyStorageDir)) {
+							try {
+								fs.mkdirSync(targetKeyStorageDir, { recursive: true, mode: 0o755 });
+							} catch (dirErr) {}
+						}
+						const targetKeyPath = path.join(targetKeyStorageDir, keyFilename);
+						try {
+							fs.copyFileSync(keyFileLocalPath, targetKeyPath);
+							keyUploadPath = targetKeyPath;
+						} catch (copyKeyErr) {}
+					}
+				}
+
+				const keyId = await uploadFileToDirectus(keyUploadPath, targetFolderId, {
+					mimetype: 'application/octet-stream',
+					storage: keyStorageAdapter
+				});
+				fileIdMap[keyFilename] = keyId;
+				uploadedFiles.push({ filename_disk: keyFilename, id: keyId });
+				logger.info(`[transcode-video-operation] (${filename}) key_only mode completed! Key File ID: ${keyId}`);
+			}
+
+			return {
+				master: null,
+				metadata: {
+					availableQualities: null,
+					dimensions: null,
+					duration: 0,
+					thumbnail: null,
+					subtitle: null,
+					audio: null,
+					s2t_json: null,
+					s2t_subtitle: null,
+					s2t_error: null
+				},
+				files: uploadedFiles
+			};
+		}
 
 		if (process_mode === 'all' || process_mode === 'hls_only' || process_mode === 'hls_and_audio') {
 			if (delete_existing_hls) {
