@@ -781,7 +781,7 @@ export default {
 					// Don't log individual file uploads to reduce log noise (especially for many segment files)
 					// Summary is logged at the end with total file count
 				} catch (uploadError) {
-					const actionVerb = isLocalStorage ? 'registering' : 'uploading';
+					const actionVerb = isFileLocalStorage ? 'registering' : 'uploading';
 					logger.error(`[transcode-video-operation] (${filename}) Error ${actionVerb} file ${fileName}:`, uploadError);
 					throw uploadError;
 				}
@@ -1609,6 +1609,9 @@ export default {
 							segmentLocalPath = tempSegmentPath;
 						}
 
+						// Delete old file record from directus_files DB BEFORE uploadOne to avoid filename_disk uniqueness collision
+						try { await filesService.deleteOne(rec.id); } catch (e) {}
+
 						const newId = await uploadFileToDirectus(segmentLocalPath, targetFolderId, {
 							mimetype: rec.type || (recName.endsWith('.ts') ? 'video/mp2t' : 'application/octet-stream'),
 							storage: targetStorageAdapter
@@ -1616,10 +1619,6 @@ export default {
 
 						fileIdMap[recName] = newId;
 						uploadedFiles.push({ filename_disk: recName, id: newId });
-
-						if (newId !== rec.id) {
-							try { await filesService.deleteOne(rec.id); } catch (e) {}
-						}
 
 						if (fs.existsSync(localCandidatePath)) {
 							try { fs.unlinkSync(localCandidatePath); } catch (e) {}
@@ -1710,6 +1709,9 @@ export default {
 					fs.mkdirSync(path.dirname(tempPlPath), { recursive: true });
 					fs.writeFileSync(tempPlPath, newLines.join('\n'));
 
+					// Delete old playlist record from directus_files DB BEFORE uploadOne to avoid filename_disk collision
+					try { await filesService.deleteOne(plRec.id); } catch (e) {}
+
 					const newPlId = await uploadFileToDirectus(tempPlPath, targetFolderId, {
 						mimetype: 'application/x-mpegurl',
 						storage: targetStorageAdapter
@@ -1718,9 +1720,6 @@ export default {
 					fileIdMap[plName] = newPlId;
 					uploadedFiles.push({ filename_disk: plName, id: newPlId });
 
-					if (newPlId !== plRec.id) {
-						try { await filesService.deleteOne(plRec.id); } catch (e) {}
-					}
 					if (fs.existsSync(localPlPath)) {
 						try { fs.unlinkSync(localPlPath); } catch (e) {}
 					}
