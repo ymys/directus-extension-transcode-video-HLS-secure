@@ -1554,19 +1554,29 @@ export default {
 
 			let movedCount = 0;
 
-			// 1. Move all non-playlist files (.ts, .jpg, etc.) to targetStorageAdapter
+			// 1. Move all non-playlist files (.ts segments) to targetStorageAdapter
 			for (const rec of existingFileRecords) {
 				const recName = rec.filename_disk as string;
 				if (!recName) continue;
 
-				if (recName === keyFilename && isKeyStorageLocal) {
+				// ALWAYS preserve .key files — never move, never delete
+				if (recName.endsWith('.key')) {
 					logger.info(`[transcode-video-operation] (${filename}) Preserving key file ${recName} in local key storage (${keyStorageAdapter})`);
 					fileIdMap[recName] = rec.id;
 					uploadedFiles.push({ filename_disk: recName, id: rec.id });
 					continue;
 				}
 
+				// Skip playlists — handled separately below
 				if (recName.endsWith('.m3u8')) {
+					continue;
+				}
+
+				// Only move .ts segment files — skip .mp4, .jpg, .mp3, etc.
+				if (!recName.endsWith('.ts')) {
+					logger.info(`[transcode-video-operation] (${filename}) Skipping non-segment file: ${recName}`);
+					fileIdMap[recName] = rec.id;
+					uploadedFiles.push({ filename_disk: recName, id: rec.id });
 					continue;
 				}
 
