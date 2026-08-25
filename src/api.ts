@@ -1512,6 +1512,7 @@ export default {
 		if (process_mode === 'move_hls') {
 			logger.info(`[transcode-video-operation] (${filename}) Running in move_hls mode. Moving local HLS files to target storage (${targetStorageAdapter})...`);
 
+			const basePath = process.env.PWD || '/directus';
 			const { FilesService } = services;
 			const filesService = new FilesService({ schema: await getSchema() });
 
@@ -1539,7 +1540,6 @@ export default {
 			const isKeyStorageLocal = getStorageDriver(keyStorageAdapter) === 'local';
 			if (isKeyStorageLocal && !keyId) {
 				const keyStorageRoot = resolveStorage(keyStorageAdapter);
-				const basePath = process.env.PWD || '/directus';
 				const localKeyRootPath = keyStorageRoot ? path.join(basePath, keyStorageRoot, keyFilename) : null;
 
 				if (localKeyRootPath && fs.existsSync(localKeyRootPath)) {
