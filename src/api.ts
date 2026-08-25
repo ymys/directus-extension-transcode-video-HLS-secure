@@ -1575,14 +1575,16 @@ export default {
 						const recStoragePath = resolveStorage(rec.storage) || 'uploads';
 						const localCandidatePath = path.join(basePath, recStoragePath, recName);
 
-						let segmentLocalPath: string;
+						// ALWAYS copy the file to temp FIRST before any DB deletion,
+						// because filesService.deleteOne() deletes both the DB record AND the physical file!
+						const tempSegmentPath = path.join(outputDir, recName);
+						fs.mkdirSync(path.dirname(tempSegmentPath), { recursive: true });
 
 						if (fs.existsSync(localCandidatePath)) {
-							segmentLocalPath = localCandidatePath;
+							// Copy local file to temp directory
+							fs.copyFileSync(localCandidatePath, tempSegmentPath);
 						} else {
-							const tempSegmentPath = path.join(outputDir, recName);
-							fs.mkdirSync(path.dirname(tempSegmentPath), { recursive: true });
-
+							// File not on disk, try to stream from Directus storage
 							let stream: any;
 							try {
 								if (typeof (filesService as any).getStream === 'function') {
@@ -1606,13 +1608,13 @@ export default {
 								writeStream.on('error', rejStream);
 								stream.on('error', rejStream);
 							});
-							segmentLocalPath = tempSegmentPath;
 						}
 
-						// Delete old file record from directus_files DB BEFORE uploadOne to avoid filename_disk uniqueness collision
+						// Now delete old DB record (this also deletes the physical local file, but we have our temp copy)
 						try { await filesService.deleteOne(rec.id); } catch (e) {}
 
-						const newId = await uploadFileToDirectus(segmentLocalPath, targetFolderId, {
+						// Upload from temp copy to target storage (R2)
+						const newId = await uploadFileToDirectus(tempSegmentPath, targetFolderId, {
 							mimetype: rec.type || (recName.endsWith('.ts') ? 'video/mp2t' : 'application/octet-stream'),
 							storage: targetStorageAdapter
 						});
@@ -1620,12 +1622,8 @@ export default {
 						fileIdMap[recName] = newId;
 						uploadedFiles.push({ filename_disk: recName, id: newId });
 
-						if (fs.existsSync(localCandidatePath)) {
-							try { fs.unlinkSync(localCandidatePath); } catch (e) {}
-						}
-						if (segmentLocalPath !== localCandidatePath && fs.existsSync(segmentLocalPath)) {
-							try { fs.unlinkSync(segmentLocalPath); } catch (e) {}
-						}
+						// Clean up temp file
+						try { fs.unlinkSync(tempSegmentPath); } catch (e) {}
 
 						movedCount++;
 						logger.info(`[transcode-video-operation] (${filename}) Successfully moved ${recName} to target storage ${targetStorageAdapter}`);
