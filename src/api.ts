@@ -50,7 +50,7 @@ interface File {
 interface OperationInput {
 	file: File | string;
 	folder_id?: string;
-	process_mode?: 'all' | 'hls_only' | 'hls_and_audio' | 'key_only' | 'audio_only' | 'transcription_only';
+	process_mode?: 'all' | 'hls_only' | 'hls_and_audio' | 'move_hls' | 'key_only' | 'audio_only' | 'transcription_only';
 	keyBaseUrl?: string;
 	playlist_reference_type?: 'id' | 'filename_disk';
 	qualities?: string[] | string;
@@ -1494,6 +1494,200 @@ export default {
 
 			return {
 				master: null,
+				metadata: {
+					availableQualities: null,
+					dimensions: null,
+					duration: 0,
+					thumbnail: null,
+					subtitle: null,
+					audio: null,
+					s2t_json: null,
+					s2t_subtitle: null,
+					s2t_error: null
+				},
+				files: uploadedFiles
+			};
+		}
+
+		if (process_mode === 'move_hls') {
+			logger.info(`[transcode-video-operation] (${filename}) Running in move_hls mode. Moving local HLS files to target storage (${targetStorageAdapter})...`);
+
+			const { FilesService } = services;
+			const filesService = new FilesService({ schema: await getSchema() });
+
+			const existingFileRecords = await filesService.readByQuery({
+				filter: {
+					_or: [
+						{ filename_disk: { _starts_with: `${filename}_` } },
+						{ filename_disk: { _eq: `${filename}.m3u8` } },
+						{ filename_disk: { _eq: `${filename}.key` } }
+					]
+				},
+				limit: -1
+			});
+
+			if (!existingFileRecords || existingFileRecords.length === 0) {
+				logger.warn(`[transcode-video-operation] (${filename}) No existing HLS files found in database for video ${filename}`);
+				return {
+					error: `No existing HLS files found for video ${filename}`
+				};
+			}
+
+			const keyRecord = existingFileRecords.find((f: any) => f.filename_disk === keyFilename);
+			let keyId: string | null = keyRecord?.id || null;
+
+			const isKeyStorageLocal = getStorageDriver(keyStorageAdapter) === 'local';
+			if (isKeyStorageLocal && !keyId) {
+				const keyStorageRoot = resolveStorage(keyStorageAdapter);
+				const basePath = process.env.PWD || '/directus';
+				const localKeyRootPath = keyStorageRoot ? path.join(basePath, keyStorageRoot, keyFilename) : null;
+
+				if (localKeyRootPath && fs.existsSync(localKeyRootPath)) {
+					try {
+						keyId = await uploadFileToDirectus(localKeyRootPath, targetFolderId, {
+							mimetype: 'application/octet-stream',
+							storage: keyStorageAdapter
+						});
+					} catch (kErr) {}
+				}
+			}
+
+			let movedCount = 0;
+
+			// 1. Move all non-playlist files (.ts, .jpg, etc.) to targetStorageAdapter
+			for (const rec of existingFileRecords) {
+				const recName = rec.filename_disk as string;
+				if (!recName) continue;
+
+				if (recName === keyFilename && isKeyStorageLocal) {
+					logger.info(`[transcode-video-operation] (${filename}) Preserving key file ${recName} in local key storage (${keyStorageAdapter})`);
+					fileIdMap[recName] = rec.id;
+					uploadedFiles.push({ filename_disk: recName, id: rec.id });
+					continue;
+				}
+
+				if (recName.endsWith('.m3u8')) {
+					continue;
+				}
+
+				if (rec.storage !== targetStorageAdapter) {
+					try {
+						const currentStream = await filesService.getStream(rec.id);
+						const tempSegmentPath = path.join(outputDir, recName);
+						fs.mkdirSync(path.dirname(tempSegmentPath), { recursive: true });
+
+						const writeStream = fs.createWriteStream(tempSegmentPath);
+						await new Promise<void>((resStream, rejStream) => {
+							currentStream.pipe(writeStream);
+							writeStream.on('finish', () => { writeStream.close(); resStream(); });
+							writeStream.on('error', rejStream);
+							currentStream.on('error', rejStream);
+						});
+
+						const newId = await uploadFileToDirectus(tempSegmentPath, targetFolderId, {
+							mimetype: rec.type || 'application/octet-stream',
+							storage: targetStorageAdapter
+						});
+
+						fileIdMap[recName] = newId;
+						uploadedFiles.push({ filename_disk: recName, id: newId });
+
+						if (newId !== rec.id) {
+							try { await filesService.deleteOne(rec.id); } catch (e) {}
+						}
+
+						try { fs.unlinkSync(tempSegmentPath); } catch (e) {}
+						movedCount++;
+						logger.info(`[transcode-video-operation] (${filename}) Moved file ${recName} to target storage ${targetStorageAdapter}`);
+					} catch (moveErr) {
+						logger.error(`[transcode-video-operation] (${filename}) Error moving file ${recName}:`, moveErr);
+					}
+				} else {
+					fileIdMap[recName] = rec.id;
+					uploadedFiles.push({ filename_disk: recName, id: rec.id });
+				}
+			}
+
+			// 2. Rebuild and upload playlists (.m3u8) to targetStorageAdapter
+			const playlistRecords = existingFileRecords.filter((rec: any) => rec.filename_disk?.endsWith('.m3u8'));
+
+			for (const plRec of playlistRecords) {
+				const plName = plRec.filename_disk as string;
+				try {
+					let playlistContent = '';
+					try {
+						const plStream = await filesService.getStream(plRec.id);
+						const chunks: Buffer[] = [];
+						await new Promise<void>((resPl, rejPl) => {
+							plStream.on('data', (chunk: Buffer) => chunks.push(chunk));
+							plStream.on('end', () => { playlistContent = Buffer.concat(chunks).toString('utf-8'); resPl(); });
+							plStream.on('error', rejPl);
+						});
+					} catch (readPlErr) {
+						logger.warn(`[transcode-video-operation] (${filename}) Could not read playlist stream for ${plName}:`, readPlErr);
+						continue;
+					}
+
+					const lines = playlistContent.split(/\r?\n/);
+					const newLines: string[] = [];
+
+					for (const line of lines) {
+						let newLine = line;
+						if (line.startsWith('#EXT-X-KEY:')) {
+							const uriMatch = line.match(/URI="([^"]+)"/);
+							if (uriMatch && uriMatch[1]) {
+								const originalKeyURI = uriMatch[1];
+								const keyBasename = path.basename(originalKeyURI);
+								const currentKeyId = fileIdMap[originalKeyURI] || fileIdMap[keyBasename] || keyId;
+
+								if (keyBaseUrl) {
+									const formattedKeyBaseUrl = keyBaseUrl.endsWith('/') ? keyBaseUrl.slice(0, -1) : keyBaseUrl;
+									const keyRef = useFilenameDisk ? keyBasename : (currentKeyId || keyBasename);
+									newLine = line.replace(`URI="${originalKeyURI}"`, `URI="${formattedKeyBaseUrl}/${keyRef}"`);
+								} else if (isKeyStorageLocal && currentKeyId) {
+									newLine = line.replace(`URI="${originalKeyURI}"`, `URI="${baseUrl}/assets/${currentKeyId}"`);
+								} else {
+									newLine = line.replace(`URI="${originalKeyURI}"`, `URI="${keyBasename}"`);
+								}
+							}
+						}
+						newLines.push(newLine);
+					}
+
+					const tempPlPath = path.join(outputDir, plName);
+					fs.mkdirSync(path.dirname(tempPlPath), { recursive: true });
+					fs.writeFileSync(tempPlPath, newLines.join('\n'));
+
+					const newPlId = await uploadFileToDirectus(tempPlPath, targetFolderId, {
+						mimetype: 'application/x-mpegurl',
+						storage: targetStorageAdapter
+					});
+
+					fileIdMap[plName] = newPlId;
+					uploadedFiles.push({ filename_disk: plName, id: newPlId });
+
+					if (newPlId !== plRec.id) {
+						try { await filesService.deleteOne(plRec.id); } catch (e) {}
+					}
+					try { fs.unlinkSync(tempPlPath); } catch (e) {}
+					movedCount++;
+					logger.info(`[transcode-video-operation] (${filename}) Rebuilt and uploaded playlist ${plName} to ${targetStorageAdapter}`);
+				} catch (plErr) {
+					logger.error(`[transcode-video-operation] (${filename}) Error processing playlist ${plName}:`, plErr);
+				}
+			}
+
+			if (fs.existsSync(outputDir)) {
+				try { fs.rmSync(outputDir, { recursive: true, force: true }); } catch (e) {}
+			}
+
+			logger.info(`[transcode-video-operation] (${filename}) move_hls completed! Successfully processed ${movedCount} HLS files to storage: ${targetStorageAdapter}`);
+
+			const masterRecord = playlistRecords.find((r: any) => r.filename_disk?.endsWith('_master.m3u8') || r.filename_disk === `${filename}.m3u8`);
+			const masterFileId = masterRecord ? (fileIdMap[masterRecord.filename_disk] || masterRecord.id) : null;
+
+			return {
+				master: masterFileId ? { id: masterFileId, filename_disk: masterRecord ? masterRecord.filename_disk : `${filename}_master.m3u8` } : null,
 				metadata: {
 					availableQualities: null,
 					dimensions: null,
