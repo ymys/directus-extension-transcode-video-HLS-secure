@@ -1572,20 +1572,45 @@ export default {
 
 				if (rec.storage !== targetStorageAdapter) {
 					try {
-						const currentStream = await filesService.getStream(rec.id);
-						const tempSegmentPath = path.join(outputDir, recName);
-						fs.mkdirSync(path.dirname(tempSegmentPath), { recursive: true });
+						const recStoragePath = resolveStorage(rec.storage) || 'uploads';
+						const localCandidatePath = path.join(basePath, recStoragePath, recName);
 
-						const writeStream = fs.createWriteStream(tempSegmentPath);
-						await new Promise<void>((resStream, rejStream) => {
-							currentStream.pipe(writeStream);
-							writeStream.on('finish', () => { writeStream.close(); resStream(); });
-							writeStream.on('error', rejStream);
-							currentStream.on('error', rejStream);
-						});
+						let segmentLocalPath: string;
 
-						const newId = await uploadFileToDirectus(tempSegmentPath, targetFolderId, {
-							mimetype: rec.type || 'application/octet-stream',
+						if (fs.existsSync(localCandidatePath)) {
+							segmentLocalPath = localCandidatePath;
+						} else {
+							const tempSegmentPath = path.join(outputDir, recName);
+							fs.mkdirSync(path.dirname(tempSegmentPath), { recursive: true });
+
+							let stream: any;
+							try {
+								if (typeof (filesService as any).getStream === 'function') {
+									stream = await (filesService as any).getStream(rec.id);
+								} else {
+									const { AssetsService } = services;
+									const assetsService = new AssetsService({ schema: await getSchema() });
+									const asset = await assetsService.getAsset(rec.id, {});
+									stream = asset?.stream;
+								}
+							} catch (sErr) {}
+
+							if (!stream) {
+								throw new Error(`Could not obtain stream for file ${recName} (ID: ${rec.id})`);
+							}
+
+							const writeStream = fs.createWriteStream(tempSegmentPath);
+							await new Promise<void>((resStream, rejStream) => {
+								stream.pipe(writeStream);
+								writeStream.on('finish', () => { writeStream.close(); resStream(); });
+								writeStream.on('error', rejStream);
+								stream.on('error', rejStream);
+							});
+							segmentLocalPath = tempSegmentPath;
+						}
+
+						const newId = await uploadFileToDirectus(segmentLocalPath, targetFolderId, {
+							mimetype: rec.type || (recName.endsWith('.ts') ? 'video/mp2t' : 'application/octet-stream'),
 							storage: targetStorageAdapter
 						});
 
@@ -1596,11 +1621,18 @@ export default {
 							try { await filesService.deleteOne(rec.id); } catch (e) {}
 						}
 
-						try { fs.unlinkSync(tempSegmentPath); } catch (e) {}
+						if (fs.existsSync(localCandidatePath)) {
+							try { fs.unlinkSync(localCandidatePath); } catch (e) {}
+						}
+						if (segmentLocalPath !== localCandidatePath && fs.existsSync(segmentLocalPath)) {
+							try { fs.unlinkSync(segmentLocalPath); } catch (e) {}
+						}
+
 						movedCount++;
-						logger.info(`[transcode-video-operation] (${filename}) Moved file ${recName} to target storage ${targetStorageAdapter}`);
+						logger.info(`[transcode-video-operation] (${filename}) Successfully moved ${recName} to target storage ${targetStorageAdapter}`);
 					} catch (moveErr) {
-						logger.error(`[transcode-video-operation] (${filename}) Error moving file ${recName}:`, moveErr);
+						const moveErrMsg = moveErr instanceof Error ? moveErr.stack || moveErr.message : String(moveErr);
+						logger.error(`[transcode-video-operation] (${filename}) Error moving file ${recName}: ${moveErrMsg}`);
 					}
 				} else {
 					fileIdMap[recName] = rec.id;
@@ -1615,16 +1647,36 @@ export default {
 				const plName = plRec.filename_disk as string;
 				try {
 					let playlistContent = '';
-					try {
-						const plStream = await filesService.getStream(plRec.id);
-						const chunks: Buffer[] = [];
-						await new Promise<void>((resPl, rejPl) => {
-							plStream.on('data', (chunk: Buffer) => chunks.push(chunk));
-							plStream.on('end', () => { playlistContent = Buffer.concat(chunks).toString('utf-8'); resPl(); });
-							plStream.on('error', rejPl);
-						});
-					} catch (readPlErr) {
-						logger.warn(`[transcode-video-operation] (${filename}) Could not read playlist stream for ${plName}:`, readPlErr);
+					const recStoragePath = resolveStorage(plRec.storage) || 'uploads';
+					const localPlPath = path.join(basePath, recStoragePath, plName);
+
+					if (fs.existsSync(localPlPath)) {
+						playlistContent = fs.readFileSync(localPlPath, 'utf-8');
+					} else {
+						let plStream: any;
+						try {
+							if (typeof (filesService as any).getStream === 'function') {
+								plStream = await (filesService as any).getStream(plRec.id);
+							} else {
+								const { AssetsService } = services;
+								const assetsService = new AssetsService({ schema: await getSchema() });
+								const asset = await assetsService.getAsset(plRec.id, {});
+								plStream = asset?.stream;
+							}
+						} catch (psErr) {}
+
+						if (plStream) {
+							const chunks: Buffer[] = [];
+							await new Promise<void>((resPl, rejPl) => {
+								plStream.on('data', (chunk: Buffer) => chunks.push(chunk));
+								plStream.on('end', () => { playlistContent = Buffer.concat(chunks).toString('utf-8'); resPl(); });
+								plStream.on('error', rejPl);
+							});
+						}
+					}
+
+					if (!playlistContent) {
+						logger.warn(`[transcode-video-operation] (${filename}) Could not read playlist content for ${plName}`);
 						continue;
 					}
 
@@ -1669,11 +1721,15 @@ export default {
 					if (newPlId !== plRec.id) {
 						try { await filesService.deleteOne(plRec.id); } catch (e) {}
 					}
+					if (fs.existsSync(localPlPath)) {
+						try { fs.unlinkSync(localPlPath); } catch (e) {}
+					}
 					try { fs.unlinkSync(tempPlPath); } catch (e) {}
 					movedCount++;
 					logger.info(`[transcode-video-operation] (${filename}) Rebuilt and uploaded playlist ${plName} to ${targetStorageAdapter}`);
 				} catch (plErr) {
-					logger.error(`[transcode-video-operation] (${filename}) Error processing playlist ${plName}:`, plErr);
+					const plErrMsg = plErr instanceof Error ? plErr.stack || plErr.message : String(plErr);
+					logger.error(`[transcode-video-operation] (${filename}) Error processing playlist ${plName}: ${plErrMsg}`);
 				}
 			}
 
