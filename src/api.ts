@@ -20,6 +20,8 @@ declare const process: {
 interface OperationContext {
 	env: {
 		STORAGE_LOCATIONS?: string | string[];
+		FFMPEG_PATH?: string;
+		FFPROBE_PATH?: string;
 		[key: string]: string | number | string[] | undefined;
 	};
 	services: {
@@ -142,6 +144,10 @@ export default {
 		}: OperationInput,
 		{ env, services, getSchema, logger }: OperationContext
 	): Promise<OperationResult | { error: string }> => {
+		// Helper to get binary path (either from env or default)
+		const ffmpegPath = (env.FFMPEG_PATH && typeof env.FFMPEG_PATH === 'string') ? env.FFMPEG_PATH : 'ffmpeg';
+		const ffprobePath = (env.FFPROBE_PATH && typeof env.FFPROBE_PATH === 'string') ? env.FFPROBE_PATH : 'ffprobe';
+
 		if (!file) {
 			logger.info("[transcode-video-operation] Input file missing");
 			throw new Error("Input file missing");
@@ -264,23 +270,23 @@ export default {
 			return [
 				{
 					id: 240,
-					options: `-vf "${pixelFormat}scale=w='min(426,iw)':h='min(240,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 22 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 400k -maxrate 428k -bufsize 600k -b:a 64k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_240p_%03d.ts ${outputDir}/${filename}_240p.m3u8`
+					options: `-vf "${pixelFormat}scale=w='min(426,iw)':h='min(240,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 22 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 400k -maxrate 428k -bufsize 600k -b:a 64k ${encryptionOptions} -hls_segment_filename "${outputDir}/${filename}_240p_%03d.ts" "${outputDir}/${filename}_240p.m3u8"`
 				},
 				{
 					id: 480,
-					options: `-vf "${pixelFormat}scale=w='min(854,iw)':h='min(480,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 1400k -maxrate 1498k -bufsize 2100k -b:a 128k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_480p_%03d.ts ${outputDir}/${filename}_480p.m3u8`
+					options: `-vf "${pixelFormat}scale=w='min(854,iw)':h='min(480,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 1400k -maxrate 1498k -bufsize 2100k -b:a 128k ${encryptionOptions} -hls_segment_filename "${outputDir}/${filename}_480p_%03d.ts" "${outputDir}/${filename}_480p.m3u8"`
 				},
 				{
 					id: 720,
-					options: `-vf "${pixelFormat}scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 2800k -maxrate 2996k -bufsize 4200k -b:a 128k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_720p_%03d.ts ${outputDir}/${filename}_720p.m3u8`
+					options: `-vf "${pixelFormat}scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 2800k -maxrate 2996k -bufsize 4200k -b:a 128k ${encryptionOptions} -hls_segment_filename "${outputDir}/${filename}_720p_%03d.ts" "${outputDir}/${filename}_720p.m3u8"`
 				},
 				{
 					id: 1080,
-					options: `-vf "${pixelFormat}scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 5000k -maxrate 5350k -bufsize 7500k -b:a 192k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_1080p_%03d.ts ${outputDir}/${filename}_1080p.m3u8`
+					options: `-vf "${pixelFormat}scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 5000k -maxrate 5350k -bufsize 7500k -b:a 192k ${encryptionOptions} -hls_segment_filename "${outputDir}/${filename}_1080p_%03d.ts" "${outputDir}/${filename}_1080p.m3u8"`
 				},
 				{
 					id: 2160,
-					options: `-vf "${pixelFormat}scale=w='min(3840,iw)':h='min(2160,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 20000k -maxrate 21400k -bufsize 30000k -b:a 192k ${encryptionOptions} -hls_segment_filename ${outputDir}/${filename}_2160p_%03d.ts ${outputDir}/${filename}_2160p.m3u8`
+					options: `-vf "${pixelFormat}scale=w='min(3840,iw)':h='min(2160,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:a aac -ar 48000 -c:v h264 -profile:v ${profile} -crf 20 -sc_threshold 0 -g 48 -keyint_min 48 -hls_time 4 -hls_playlist_type vod -b:v 20000k -maxrate 21400k -bufsize 30000k -b:a 192k ${encryptionOptions} -hls_segment_filename "${outputDir}/${filename}_2160p_%03d.ts" "${outputDir}/${filename}_2160p.m3u8"`
 				}
 			];
 		};
@@ -295,7 +301,7 @@ export default {
 		const getVideoMetadata = async (inputFile: string): Promise<VideoMetadata> => {
 			return new Promise((resolve, reject) => {
 				// Get width, height, duration, and rotation
-				exec(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height:format=duration -of json ${inputFile}`,
+				exec(`${ffprobePath} -v error -select_streams v:0 -show_entries stream=width,height:format=duration -of json "${inputFile}"`,
 					(error, stdout) => {
 						if (error) {
 							logger.error(`[transcode-video-operation] (${filename}) Error getting video metadata:`, error);
@@ -330,7 +336,8 @@ export default {
 		// Extract thumbnail at 1 second
 		const extractThumbnail = async (inputFile: string, outputPath: string): Promise<string> => {
 			return new Promise((resolve, reject) => {
-				exec(`ffmpeg -y -i ${inputFile} -ss 1 -vframes 1 -q:v 2 ${outputPath}`, (error, stdout, stderr) => {
+				// Extract a single frame at 1 second
+				exec(`${ffmpegPath} -y -ss 1 -i "${inputFile}" -frames:v 1 -q:v 2 "${outputPath}"`, (error, stdout, stderr) => {
 					if (error) {
 						logger.error(`[transcode-video-operation] (${filename}) Error extracting thumbnail:`, error);
 						if (stderr) {
@@ -370,7 +377,7 @@ export default {
 		// Get image metadata (dimensions)
 		const getImageMetadata = async (imagePath: string): Promise<ImageMetadata> => {
 			return new Promise((resolve, reject) => {
-				exec(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of json ${imagePath}`,
+				exec(`${ffprobePath} -v error -select_streams v:0 -show_entries stream=width,height -of json "${imagePath}"`,
 					(error, stdout) => {
 						if (error) {
 							logger.error(`[transcode-video-operation] (${filename}) Error getting image metadata:`, error);
@@ -695,11 +702,11 @@ export default {
 			return newLines.join('\n');
 		};
 
-		function checkFFmpegAvailable(): Promise<void> {
+		async function checkFFmpegAvailable(): Promise<void> {
 			return new Promise((resolve, reject) => {
-				exec('which ffmpeg', (error, stdout, stderr) => {
-					if (error || !stdout.trim()) {
-						reject(new Error('FFmpeg is not installed or not found in PATH. Please install ffmpeg.'));
+				exec(`${ffmpegPath} -version`, (error, stdout, stderr) => {
+					if (error) {
+						reject(new Error(`FFmpeg is not installed or not found at path: ${ffmpegPath}. Please install ffmpeg or set FFMPEG_PATH.`));
 						return;
 					}
 					resolve();
@@ -716,7 +723,7 @@ export default {
 				if (isWindows && niceValue !== undefined && niceValue !== null) {
 					logger.warn(`[transcode-video-operation] (${filename}) Nice value (${niceValue}) specified but running on Windows - nice command not available, ignoring priority setting`);
 				}
-				const command = `${nicePrefix}ffmpeg -y -i ${inputFile} -threads ${validatedThreads} ${quality.options}`;
+				const command = `${nicePrefix}${ffmpegPath} -y -i "${inputFile}" -threads ${validatedThreads} ${quality.options}`;
 				exec(command, (error, stdout, stderr) => {
 					if (error) {
 						logger.error(`[transcode-video-operation] (${filename}) Error occured for quality: %s`, quality.id);
@@ -1036,7 +1043,7 @@ export default {
 
 		// Check if input is 10-bit by examining the video stream
 		const isHighBitDepth = await new Promise<boolean>((resolve, reject) => {
-			exec(`ffprobe -v error -select_streams v:0 -show_entries stream=pix_fmt -of json ${filePath}`,
+			exec(`${ffprobePath} -v error -select_streams v:0 -show_entries stream=pix_fmt -of json "${filePath}"`,
 				(error, stdout) => {
 					if (error) {
 						logger.warn(`[transcode-video-operation] (${filename}) Error checking bit depth, assuming 8-bit: %s`, error.message);
@@ -1084,7 +1091,7 @@ export default {
 				// 1. Extract 16kHz mono audio for transcription
 				logger.info(`[transcode-video-operation] (${filename}) Extracting audio to: ${audioTempPath}`);
 				await new Promise<void>((resolve, reject) => {
-					exec(`ffmpeg -i ${filePath} -vn -acodec pcm_s16le -ar 16000 -ac 1 -y ${audioTempPath}`, (error: any) => {
+					exec(`${ffmpegPath} -y -i "${filePath}" -ar 16000 -ac 1 -c:a pcm_s16le "${audioTempPath}"`, (error) => {
 						if (error) reject(error);
 						else resolve();
 					});
