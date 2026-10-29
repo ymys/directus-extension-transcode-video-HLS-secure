@@ -63,6 +63,8 @@ interface OperationInput {
 	key_target_storage?: string;
 	audio_storage_adapter?: 'directus' | 'target' | 'custom';
 	audio_target_storage?: string;
+	source_storage_adapter?: 'directus' | 'r2_private' | 'target' | 'custom';
+	source_target_storage?: string;
 	delete_source_file?: boolean;
 	delete_existing_hls?: boolean;
 	generate_captions?: boolean;
@@ -146,6 +148,8 @@ export default {
 			key_target_storage,
 			audio_storage_adapter = 'directus',
 			audio_target_storage,
+			source_storage_adapter = 'directus',
+			source_target_storage,
 			delete_source_file = false,
 			delete_existing_hls = false,
 			generate_captions = false,
@@ -420,6 +424,35 @@ export default {
 			logger.warn(`[transcode-video-operation] (${filename}) NOTICE: Key storage (${keyStorageAdapter}) differs from target HLS storage (${targetStorageAdapter}). HLS players reading playlists from ${targetStorageAdapter} will look for the .key file on ${targetStorageAdapter}. Set "Key Storage Adapter" to "Same as HLS Target Storage" (target) OR configure "Key Base URL" to your Directus assets domain so players can find the key!`);
 		}
 
+		// Determine original source video storage adapter
+		let originalStorageAdapter: string | null = null;
+		if (source_storage_adapter === 'target') {
+			originalStorageAdapter = targetStorageAdapter;
+			logger.info(`[transcode-video-operation] (${filename}) Using target storage for original source video backup: ${originalStorageAdapter}`);
+		} else if (source_storage_adapter === 'r2_private') {
+			const privR2Location = storageLocations.find(loc => 
+				loc.toLowerCase() === 'r2_private' || 
+				loc.toLowerCase() === 'private_r2' ||
+				(loc.toLowerCase().includes('r2') && loc.toLowerCase().includes('priv'))
+			) || 'r2_private';
+
+			if (!validateStorageExists(privR2Location)) {
+				const errorMsg = `Storage location "${privR2Location}" does not exist in Directus configuration. Location "${privR2Location}" must be added to STORAGE_LOCATIONS in your Directus .env file (e.g. STORAGE_LOCATIONS="local,r2,${privR2Location}") AND STORAGE_${privR2Location.toUpperCase()}_DRIVER must be configured. Available configured locations: ${JSON.stringify(storageLocations)}`;
+				logger.error(`[transcode-video-operation] (${filename}) ${errorMsg}`);
+				throw new Error(errorMsg);
+			}
+			originalStorageAdapter = privR2Location;
+			logger.info(`[transcode-video-operation] (${filename}) Using Private Cloudflare R2 storage for source video backup: ${originalStorageAdapter}`);
+		} else if (source_storage_adapter === 'custom' && source_target_storage) {
+			if (!validateStorageExists(source_target_storage)) {
+				const errorMsg = `Custom source storage location "${source_target_storage}" does not exist in Directus configuration. Available locations: ${JSON.stringify(storageLocations)}`;
+				logger.error(`[transcode-video-operation] (${filename}) ${errorMsg}`);
+				throw new Error(errorMsg);
+			}
+			originalStorageAdapter = source_target_storage;
+			logger.info(`[transcode-video-operation] (${filename}) Using custom storage for source video backup: ${originalStorageAdapter}`);
+		}
+
 		// Determine target storage driver early (used for output directory and cleanup)
 		const targetStorageDriver = getStorageDriver(targetStorageAdapter);
 		const isLocalTarget = targetStorageDriver === 'local';
@@ -654,7 +687,15 @@ export default {
 		const uploadFileToDirectus = async (
 			filePath: string,
 			folderId: string | null = null,
-			options: { mimetype?: string; width?: number | null; height?: number | null; storage?: string } = {}
+			options: { 
+				mimetype?: string; 
+				width?: number | null; 
+				height?: number | null; 
+				storage?: string;
+				filename_disk?: string;
+				filename_download?: string;
+				title?: string;
+			} = {}
 		): Promise<string> => {
 			try {
 				const { FilesService } = services;
@@ -662,7 +703,7 @@ export default {
 					schema: await getSchema(),
 				});
 
-				const fileName = path.basename(filePath);
+				const fileName = options.filename_disk || path.basename(filePath);
 				const extension = fileName.substr(fileName.lastIndexOf('.') + 1);
 
 				// Verify file exists before attempting upload
@@ -719,8 +760,8 @@ export default {
 				const fileData: any = {
 					storage: storage,
 					filename_disk: fileName,
-					filename_download: fileName,
-					title: fileName,
+					filename_download: options.filename_download || fileName,
+					title: options.title || fileName,
 					type: mimetype,
 					filesize: fileSizeInBytes
 				};
@@ -805,6 +846,41 @@ export default {
 					logger.error(`[transcode-video-operation] (${filename}) Error stack: ${errorStack}`);
 				}
 				throw error;
+			}
+		};
+
+		let sourceBackupId: string | null = null;
+		const uploadSourceBackupIfNeeded = async (parentFolderId: string | null = null): Promise<string | null> => {
+			if (!originalStorageAdapter || originalStorageAdapter === 'directus') {
+				return null;
+			}
+
+			if (fileObject.storage === originalStorageAdapter) {
+				logger.info(`[transcode-video-operation] (${filename}) Original source file is already stored in target private storage (${originalStorageAdapter}), skipping re-upload.`);
+				return targetFileId;
+			}
+
+			if (!filePath || !fs.existsSync(filePath)) {
+				logger.warn(`[transcode-video-operation] (${filename}) Original source file path not found for backup upload: ${filePath}`);
+				return null;
+			}
+
+			try {
+				logger.info(`[transcode-video-operation] (${filename}) Uploading original source file (${fileObject.filename_disk}) to private storage: ${originalStorageAdapter}...`);
+				const backupId = await uploadFileToDirectus(filePath, parentFolderId, {
+					mimetype: fileObject.type || 'video/mp4',
+					storage: originalStorageAdapter,
+					filename_disk: fileObject.filename_disk,
+					filename_download: fileObject.filename_download || fileObject.filename_disk,
+					title: fileObject.title || fileObject.filename_disk,
+					width: fileObject.width || (typeof metadata !== 'undefined' ? (metadata as any)?.width : null),
+					height: fileObject.height || (typeof metadata !== 'undefined' ? (metadata as any)?.height : null)
+				});
+				logger.info(`[transcode-video-operation] (${filename}) Original source file uploaded to private storage (${originalStorageAdapter}) successfully! File ID: ${backupId}`);
+				return backupId;
+			} catch (backupErr) {
+				logger.error(`[transcode-video-operation] (${filename}) Error uploading original source file to private storage (${originalStorageAdapter}):`, backupErr);
+				throw backupErr;
 			}
 		};
 
@@ -1746,6 +1822,25 @@ export default {
 
 			logger.info(`[transcode-video-operation] (${filename}) move_hls completed! Successfully processed ${movedCount} HLS files to storage: ${targetStorageAdapter}`);
 
+			// Upload original source video to private storage if configured
+			sourceBackupId = await uploadSourceBackupIfNeeded(targetFolderId);
+			if (sourceBackupId) {
+				uploadedFiles.push({ filename_disk: fileObject.filename_disk, id: sourceBackupId });
+			}
+
+			// Delete original source file if delete_source_file option is enabled
+			if (delete_source_file && targetFileId && targetFileId !== sourceBackupId) {
+				try {
+					logger.info(`[transcode-video-operation] (${filename}) delete_source_file is enabled. Deleting original source file record (ID: ${targetFileId})...`);
+					const { FilesService } = services;
+					const filesService = new FilesService({ schema: await getSchema() });
+					await filesService.deleteOne(targetFileId);
+					logger.info(`[transcode-video-operation] (${filename}) Original source file deleted successfully.`);
+				} catch (deleteSourceErr) {
+					logger.error(`[transcode-video-operation] (${filename}) Could not delete original source file ${targetFileId}:`, deleteSourceErr);
+				}
+			}
+
 			const masterRecord = playlistRecords.find((r: any) => r.filename_disk?.endsWith('_master.m3u8') || r.filename_disk === `${filename}.m3u8`);
 			const masterFileId = masterRecord ? (fileIdMap[masterRecord.filename_disk] || masterRecord.id) : null;
 
@@ -1762,6 +1857,11 @@ export default {
 					s2t_subtitle: null,
 					s2t_error: null
 				},
+				source_backup: sourceBackupId ? {
+					id: sourceBackupId,
+					filename_disk: fileObject.filename_disk,
+					storage: originalStorageAdapter
+				} : null,
 				files: uploadedFiles
 			};
 		}
@@ -2911,6 +3011,12 @@ export default {
 			}
 		}
 
+		// Upload original source video to private storage if configured (before tempSourceFile is cleaned up)
+		sourceBackupId = await uploadSourceBackupIfNeeded(targetFolderId);
+		if (sourceBackupId) {
+			uploadedFiles.push({ filename_disk: fileObject.filename_disk, id: sourceBackupId });
+		}
+
 		// Clean up temporary source file if it was downloaded from cloud storage
 		if (needsCleanup && tempSourceFile) {
 			try {
@@ -2947,7 +3053,7 @@ export default {
 		}
 
 		// Delete original source file if delete_source_file option is enabled
-		if (delete_source_file && targetFileId) {
+		if (delete_source_file && targetFileId && targetFileId !== sourceBackupId) {
 			try {
 				logger.info(`[transcode-video-operation] (${filename}) delete_source_file is enabled. Deleting original source file record (ID: ${targetFileId})...`);
 				const { FilesService } = services;
@@ -2976,6 +3082,11 @@ export default {
 				s2t_subtitle: s2tSubtitleId,
 				s2t_error: s2tErrorMessage
 			},
+			source_backup: sourceBackupId ? {
+				id: sourceBackupId,
+				filename_disk: fileObject.filename_disk,
+				storage: originalStorageAdapter
+			} : null,
 			files: uploadedFiles
 		};
 	}

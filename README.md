@@ -25,6 +25,8 @@ This extension adds a custom operation to Directus Flows that automatically tran
 - **Flexible Storage & Key Security Configuration**: Choose where transcoded files and encryption keys are stored:
   - **Cloudflare R2 Storage**: Save master playlists, quality playlists, and `.ts` segment files directly to Cloudflare R2
   - **Secured Key Preservation**: Keep the AES-128 encryption key (`filename.key`) saved at Directus while hosting HLS files on Cloudflare R2, so streaming from Cloudflare remains fully secured via Directus authentication
+- **Original Source Video Archiving to Private R2**: Automatically upload a copy/backup of the original source video (.mp4) to a dedicated Private Cloudflare R2 bucket (`r2_private`), keeping your master videos secure in cold/cloud storage
+- **Safe Local Disk Cleanup**: Optionally delete the original local source video file and database record once transcoding and the private R2 backup upload are safely complete, preventing your server disk from filling up
  
 
 ## Requirements
@@ -139,6 +141,20 @@ directus/extensions/directus-extension-transcode-video-operation/
   - **Same as HLS Target Storage**: Stores the encryption key in the same storage location as HLS files
   - **Other Custom Location**: Stores the key in a custom storage location specified by `Key Custom Storage Location`
 
+- **Original Source Storage Location** (optional, default: `Keep in Directus (Local/Default Storage)`): Where the original uploaded source video file (.mp4) should be stored or archived:
+  - **Keep in Directus (Local/Default Storage)** (default): Leaves the original video intact in its current Directus storage location.
+  - **Private Cloudflare R2 Storage (r2_private)**: Uploads a standalone backup copy of the original source video to your private Cloudflare R2 bucket.
+  - **Same as HLS Target Storage**: Uploads the source video backup to the same storage configured for HLS files.
+  - **Other Custom Location**: Stores the original video backup in a custom storage location specified by `Original Source Custom Storage Location`.
+
+- **Original Source Custom Storage Location** (optional): Custom storage location name for source backup
+  - Only visible when "Original Source Storage Location" is set to "Other Custom Location".
+  - Must match one of your configured storage locations in `.env`.
+
+- **Delete Original Source File** (optional, default: `false`): Delete the local source video after processing
+  - If enabled (`true`), automatically deletes the original source video file and its database record from Directus local storage *after* transcoding and after the private R2 upload (if configured) successfully finishes.
+  - Keeps server disk storage lightweight while your master video remains safely archived on Private Cloudflare R2.
+
 - **Delete Existing HLS Files** (optional, default: `false`): Enable when reprocessing existing videos
   - If enabled (`true`), automatically purges all previously transcoded HLS file records and physical files from Directus database and storage before generating fresh AES-128 secured HLS streams.
   - Use this option when migrating older unencrypted HLS videos to the new secured AES-128 format on Cloudflare R2.
@@ -235,6 +251,11 @@ The operation returns a JSON object with:
     "duration": 125000,
     "thumbnail": "thumbnail-file-uuid"
   },
+  "source_backup": {
+    "id": "backup-file-uuid",
+    "filename_disk": "video-filename.mp4",
+    "storage": "r2_private"
+  },
   "files": [
     {
       "filename_disk": "video-filename_240p.m3u8",
@@ -318,13 +339,42 @@ The operation automatically detects the source video resolution and only transco
 
 ## Environment Variables
 
-The operation requires several standard Directus environment variables to be correctly configured:
+The operation requires standard Directus environment variables to resolve storage locations:
 
-- `STORAGE_LOCATIONS`: Needed to resolve all available storage locations.
-- `STORAGE_[LOCATION]_DRIVER`: Needed to distinguish between local and cloud storage.
-- `STORAGE_[LOCATION]_ROOT`: Required for local storage path resolution.
-- `PUBLIC_URL`: Used to construct the internal download URL when source files are on cloud storage.
+- `STORAGE_LOCATIONS`: Comma-separated list of storage locations (e.g., `local,r2,r2_private`).
+- `STORAGE_[LOCATION]_DRIVER`: Driver type (e.g., `local`, `s3`).
+- `STORAGE_[LOCATION]_ROOT`: Local path root for local storage drivers.
+- `PUBLIC_URL`: Used to construct internal download URLs when source files or keys are requested.
 - `HOST` and `PORT`: Used as fallbacks if `PUBLIC_URL` is not defined.
+
+### Example Multi-Storage Configuration (Cloudflare R2 for HLS + Private R2 for Master Archive)
+
+```dotenv
+STORAGE_LOCATIONS="local,r2,r2_private"
+
+# Local Storage (Directus default)
+STORAGE_LOCAL_DRIVER="local"
+STORAGE_LOCAL_ROOT="./uploads"
+
+# Public / CDN Cloudflare R2 (for HLS Playlists & Segments)
+STORAGE_R2_DRIVER="s3"
+STORAGE_R2_KEY="your-r2-access-key-id"
+STORAGE_R2_SECRET="your-r2-secret-access-key"
+STORAGE_R2_BUCKET="your-hls-bucket"
+STORAGE_R2_REGION="auto"
+STORAGE_R2_ENDPOINT="https://<account_id>.r2.cloudflarestorage.com"
+STORAGE_R2_PUBLIC_URL="https://pub-xxxx.r2.dev"
+STORAGE_R2_S3_FORCE_PATH_STYLE="true"
+
+# Private Cloudflare R2 (for Original Source Video Backup/Archive)
+STORAGE_R2_PRIVATE_DRIVER="s3"
+STORAGE_R2_PRIVATE_KEY="your-private-r2-access-key-id"
+STORAGE_R2_PRIVATE_SECRET="your-private-r2-secret-access-key"
+STORAGE_R2_PRIVATE_BUCKET="your-private-archive-bucket"
+STORAGE_R2_PRIVATE_REGION="auto"
+STORAGE_R2_PRIVATE_ENDPOINT="https://<account_id>.r2.cloudflarestorage.com"
+STORAGE_R2_PRIVATE_S3_FORCE_PATH_STYLE="true"
+```
 
 ## Security Considerations
 

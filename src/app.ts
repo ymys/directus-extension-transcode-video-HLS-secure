@@ -373,13 +373,64 @@ export default {
 			}
 		},
 		{
+			field: 'source_storage_adapter',
+			name: 'Original Source Storage Location',
+			type: 'string',
+			meta: {
+				width: 'half',
+				interface: 'select-radio',
+				options: {
+					choices: [
+						{ text: 'Keep in Directus (Local/Default Storage)', value: 'directus' },
+						{ text: 'Private Cloudflare R2 Storage (r2_private)', value: 'r2_private' },
+						{ text: 'Same as HLS Target Storage', value: 'target' },
+						{ text: 'Other Custom Location', value: 'custom' }
+					]
+				},
+				note: 'Where the original source video file (.mp4) should be uploaded/archived. Selecting Private Cloudflare R2 will upload a standalone backup of the source video to your private R2 bucket.'
+			},
+			schema: {
+				default_value: 'directus'
+			}
+		},
+		{
+			field: 'source_target_storage',
+			name: 'Original Source Custom Storage Location',
+			type: 'string',
+			meta: {
+				width: 'half',
+				interface: 'input',
+				options: {
+					placeholder: 'e.g., r2_private, s3'
+				},
+				note: 'Specify the custom storage location name for original source video backup.',
+				conditions: [
+					{
+						name: 'Hide when source_storage_adapter is not custom',
+						rule: {
+							_or: [
+								{ source_storage_adapter: { _eq: 'directus' } },
+								{ source_storage_adapter: { _eq: 'r2_private' } },
+								{ source_storage_adapter: { _eq: 'target' } },
+								{ source_storage_adapter: { _null: true } }
+							]
+						},
+						hidden: true
+					}
+				]
+			},
+			schema: {
+				required: false
+			}
+		},
+		{
 			field: 'delete_source_file',
 			name: 'Delete Original Source File',
 			type: 'boolean',
 			meta: {
 				width: 'half',
 				interface: 'boolean',
-				note: 'If enabled, the original source video file (.mp4) will be deleted from Directus database and storage after transcoding completes. Default: disabled (leave source file intact).'
+				note: 'If enabled, the original source video file (.mp4) will be deleted from Directus local database and storage after transcoding completes (and after private R2 upload if configured). Default: disabled (leave source file intact).'
 			},
 			schema: {
 				default_value: false
