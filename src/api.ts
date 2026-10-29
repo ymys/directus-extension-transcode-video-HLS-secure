@@ -200,8 +200,31 @@ export default {
 				fileObject = fileRecord as File;
 				logger.info(`[transcode-video-operation] Fetched file record from UUID: ${targetFileId}`);
 			} catch (error) {
-				logger.warn(`[transcode-video-operation] Could not fetch file record with ID ${targetFileId}, falling back to provided input object:`, error);
-				fileObject = file as File;
+				logger.warn(`[transcode-video-operation] Could not fetch file record with ID ${targetFileId}, falling back to provided input object or temp workspace recovery:`, error);
+				if (file && typeof file === 'object' && (file as File).filename_disk) {
+					fileObject = file as File;
+				} else {
+					// Check if an isolated temp source file exists in /directus/tmp/transcode for this UUID
+					const tempDirCheck = path.join(process.env.PWD || '/directus', 'tmp', 'transcode');
+					let recoveredExt = 'mp4';
+					if (fs.existsSync(tempDirCheck)) {
+						try {
+							const match = fs.readdirSync(tempDirCheck).find(fn => fn.startsWith('source_') && fn.includes(targetFileId!));
+							if (match) {
+								const dotIdx = match.lastIndexOf('.');
+								if (dotIdx > 0) recoveredExt = match.substring(dotIdx + 1);
+							}
+						} catch (e) {}
+					}
+					fileObject = {
+						id: targetFileId,
+						filename_disk: `${targetFileId}.${recoveredExt}`,
+						filename_download: `${targetFileId}.${recoveredExt}`,
+						storage: (env.STORAGE_LOCATIONS ? (Array.isArray(env.STORAGE_LOCATIONS) ? String(env.STORAGE_LOCATIONS[0]).trim() : String(env.STORAGE_LOCATIONS).split(',')[0].trim()) : 'local'),
+						type: `video/${recoveredExt === 'mp3' ? 'mpeg' : recoveredExt}`
+					};
+					logger.info(`[transcode-video-operation] Constructed fallback fileObject for UUID ${targetFileId}: ${fileObject.filename_disk}`);
+				}
 			}
 		} else if (file && typeof file === 'object' && file.filename_disk) {
 			try {
@@ -731,28 +754,42 @@ export default {
 
 				const mimetype = options.mimetype || types[extension] || 'application/octet-stream';
 
-				// Check if file already exists in Directus
-				const filter: any = {
-					filename_disk: { _eq: fileName },
-					storage: { _eq: storage }
-				};
-				if (folderId) {
-					filter.folder = { _eq: folderId };
-				} else {
-					filter.folder = { _null: true };
-				}
-
+				// Check if file with this filename_disk already exists in Directus (across ANY storage or folder,
+				// because Directus's assertUniqueFilename enforces global uniqueness of filename_disk across directus_files)
 				const existingFiles = await filesService.readByQuery({
-					filter: filter,
-					limit: 1
+					filter: {
+						filename_disk: { _eq: fileName }
+					},
+					limit: -1
 				});
 
 				if (existingFiles && Array.isArray(existingFiles) && existingFiles.length > 0) {
-					const existingFile = existingFiles[0];
-					const existingFileId = existingFile?.id || existingFile?.data?.id || (typeof existingFile === 'string' ? existingFile : null);
-					if (existingFileId) {
-						logger.info(`[transcode-video-operation] (${filename}) File already exists in Directus: ${fileName} (ID: ${existingFileId}), reusing`);
-						return String(existingFileId);
+					const isPlaylistFile = fileName.toLowerCase().endsWith('.m3u8');
+					const isKeyFile = fileName.toLowerCase().endsWith('.key');
+
+					// If a matching record is already in the target storage (and isn't a freshly rebuilt .m3u8 playlist), reuse it
+					const matchingTargetRecord = existingFiles.find((f: any) => f.storage === storage);
+					if (matchingTargetRecord && (!isPlaylistFile || isKeyFile)) {
+						const existingFileId = matchingTargetRecord?.id || matchingTargetRecord?.data?.id || (typeof matchingTargetRecord === 'string' ? matchingTargetRecord : null);
+						if (existingFileId) {
+							logger.info(`[transcode-video-operation] (${filename}) File already exists in Directus (${storage}): ${fileName} (ID: ${existingFileId}), reusing`);
+							return String(existingFileId);
+						}
+					}
+
+					// Otherwise (e.g. moving from local to r2/r2_private, or updating a rebuilt .m3u8 playlist),
+					// remove old record(s) with the same filename_disk BEFORE uploadOne() so assertUniqueFilename does not throw ForbiddenError.
+					if (!isKeyFile) {
+						for (const oldFile of existingFiles) {
+							const oldId = oldFile?.id || oldFile?.data?.id || (typeof oldFile === 'string' ? oldFile : null);
+							if (oldId) {
+								try {
+									await filesService.deleteOne(oldId);
+								} catch (delExistingErr) {
+									logger.warn(`[transcode-video-operation] (${filename}) Could not delete existing file record ${oldId} (${fileName}) before upload:`, delExistingErr);
+								}
+							}
+						}
 					}
 				}
 
@@ -860,12 +897,85 @@ export default {
 				return targetFileId;
 			}
 
+			// If filePath is missing, attempt to locate isolated source copy in /directus/tmp/transcode
+			if (!filePath || !fs.existsSync(filePath)) {
+				const tempDirSearch = path.join(process.env.PWD || '/directus', 'tmp', 'transcode');
+				if (fs.existsSync(tempDirSearch)) {
+					try {
+						const match = fs.readdirSync(tempDirSearch).find(fn =>
+							fn.startsWith('source_') && (fn.includes(filename) || (targetFileId && fn.includes(targetFileId)))
+						);
+						if (match) {
+							const candidateTemp = path.join(tempDirSearch, match);
+							if (fs.existsSync(candidateTemp) && fs.statSync(candidateTemp).size > 0) {
+								filePath = candidateTemp;
+								logger.info(`[transcode-video-operation] (${filename}) Recovered source file from temporary workspace for private storage upload: ${filePath}`);
+							}
+						}
+					} catch (e) {}
+				}
+			}
+
 			if (!filePath || !fs.existsSync(filePath)) {
 				logger.warn(`[transcode-video-operation] (${filename}) Original source file path not found for backup upload: ${filePath}`);
 				return null;
 			}
 
+			const { FilesService } = services;
+			const fsService = new FilesService({ schema: await getSchema() });
+			const deletedSourceRecords: any[] = [];
+
 			try {
+				// 1. Check if a record with this filename_disk already exists in directus_files across ANY storage or folder.
+				// Directus's internal assertUniqueFilename() throws ForbiddenError ("You don't have permission to access this.")
+				// if ANY record in directus_files already has the same filename_disk when uploadOne() calls createOne().
+				const existingRecords = await fsService.readByQuery({
+					filter: {
+						filename_disk: { _eq: fileObject.filename_disk }
+					},
+					limit: -1
+				});
+
+				if (existingRecords && Array.isArray(existingRecords) && existingRecords.length > 0) {
+					const alreadyInTarget = existingRecords.find((r: any) => r.storage === originalStorageAdapter);
+					if (alreadyInTarget && alreadyInTarget.id) {
+						logger.info(`[transcode-video-operation] (${filename}) Original source file already exists in ${originalStorageAdapter} (ID: ${alreadyInTarget.id}), reusing.`);
+						return String(alreadyInTarget.id);
+					}
+
+					// Delete existing record(s) with the same filename_disk BEFORE uploadOne() to avoid Directus assertUniqueFilename ForbiddenError.
+					// This is safe because filePath points to the isolated copy in /directus/tmp/transcode/source_...
+					for (const rec of existingRecords) {
+						const recId = rec?.id || rec?.data?.id || (typeof rec === 'string' ? rec : null);
+						if (recId) {
+							deletedSourceRecords.push(rec);
+							logger.info(`[transcode-video-operation] (${filename}) Removing old DB record (ID: ${recId}, storage: ${rec.storage}) before uploading to ${originalStorageAdapter} to prevent filename_disk uniqueness collision...`);
+							try {
+								await fsService.deleteOne(recId);
+							} catch (delErr) {
+								logger.warn(`[transcode-video-operation] (${filename}) Could not delete old DB record ${recId}:`, delErr);
+							}
+						}
+					}
+
+					// If delete_source_file is false and source was on local storage, restore the physical local file copy that deleteOne removed
+					if (!delete_source_file && isLocalSource) {
+						const localRoot = resolveStorage(fileObject.storage);
+						if (localRoot) {
+							const basePath = process.env.PWD || '/directus';
+							const localRestorePath = path.join(basePath, localRoot, fileObject.filename_disk);
+							if (!fs.existsSync(localRestorePath)) {
+								try {
+									fs.copyFileSync(filePath, localRestorePath);
+									logger.info(`[transcode-video-operation] (${filename}) Restored physical source file to local storage (${localRestorePath}) since delete_source_file is false.`);
+								} catch (restoreCopyErr) {
+									logger.warn(`[transcode-video-operation] (${filename}) Could not restore local copy to ${localRestorePath}:`, restoreCopyErr);
+								}
+							}
+						}
+					}
+				}
+
 				logger.info(`[transcode-video-operation] (${filename}) Uploading original source file (${fileObject.filename_disk}) to private storage: ${originalStorageAdapter}...`);
 				const backupId = await uploadFileToDirectus(filePath, parentFolderId, {
 					mimetype: fileObject.type || 'video/mp4',
@@ -879,7 +989,28 @@ export default {
 				logger.info(`[transcode-video-operation] (${filename}) Original source file uploaded to private storage (${originalStorageAdapter}) successfully! File ID: ${backupId}`);
 				return backupId;
 			} catch (backupErr) {
-				logger.error(`[transcode-video-operation] (${filename}) Error uploading original source file to private storage (${originalStorageAdapter}):`, backupErr);
+				// Preserve the isolated temp source file on disk so the .mp4 is NEVER lost if private storage upload fails!
+				needsCleanup = false;
+				logger.error(`[transcode-video-operation] (${filename}) Error uploading original source file to private storage (${originalStorageAdapter}). Temp source file preserved at: ${filePath}`, backupErr);
+
+				// Attempt to restore the original local file record in Directus if we removed it before upload
+				if (deletedSourceRecords.length > 0 && filePath && fs.existsSync(filePath)) {
+					try {
+						const origRec = deletedSourceRecords[0];
+						const origStorage = origRec.storage || fileObject.storage || defaultStorageAdapter;
+						logger.info(`[transcode-video-operation] (${filename}) Restoring original source file record to storage "${origStorage}" after failed private storage upload...`);
+						await uploadFileToDirectus(filePath, origRec.folder || folder_id || null, {
+							mimetype: fileObject.type || 'video/mp4',
+							storage: origStorage,
+							filename_disk: fileObject.filename_disk,
+							filename_download: fileObject.filename_download || fileObject.filename_disk,
+							title: fileObject.title || fileObject.filename_disk
+						});
+					} catch (restoreErr) {
+						logger.warn(`[transcode-video-operation] (${filename}) Could not automatically re-register local source record; physical file remains intact at ${filePath}:`, restoreErr);
+					}
+				}
+
 				throw backupErr;
 			}
 		};
@@ -1414,6 +1545,27 @@ export default {
 			}
 		}
 
+		// Check if an isolated temp source copy already exists in /directus/tmp/transcode (e.g. from a previous interrupted run)
+		if (!sourcePrepared && fs.existsSync(tempDir)) {
+			try {
+				const existingTempMatch = fs.readdirSync(tempDir).find(fn =>
+					fn.startsWith('source_') && (fn.includes(filename) || (fileId && fn.includes(fileId)))
+				);
+				if (existingTempMatch) {
+					const existingTempFullPath = path.join(tempDir, existingTempMatch);
+					if (fs.existsSync(existingTempFullPath) && fs.statSync(existingTempFullPath).size > 0) {
+						filePath = existingTempFullPath;
+						tempSourceFile = existingTempFullPath;
+						needsCleanup = true;
+						sourcePrepared = true;
+						logger.info(`[transcode-video-operation] (${filename}) Found and recovered existing isolated source file in temporary workspace: ${existingTempFullPath}`);
+					}
+				}
+			} catch (tempScanErr) {
+				logger.warn(`[transcode-video-operation] (${filename}) Could not scan tempDir for existing source file:`, tempScanErr);
+			}
+		}
+
 		if (!sourcePrepared && fileId) {
 			try {
 				logger.info(`[transcode-video-operation] (${filename}) Fetching source file stream to isolated temporary workspace: ${isolatedSourcePath}`);
@@ -1425,10 +1577,14 @@ export default {
 				logger.info(`[transcode-video-operation] (${filename}) Source file stream fetched successfully to: ${filePath}`);
 			} catch (dlErr) {
 				const errorMessage = dlErr instanceof Error ? dlErr.message : String(dlErr);
-				logger.error(`[transcode-video-operation] (${filename}) Error fetching source file: ${errorMessage}`);
-				return {
-					error: `Failed to fetch source file: ${errorMessage}`
-				};
+				if (process_mode === 'move_hls' || process_mode === 'key_only') {
+					logger.warn(`[transcode-video-operation] (${filename}) Source file stream unavailable (${errorMessage}), continuing ${process_mode} mode without local source file.`);
+				} else {
+					logger.error(`[transcode-video-operation] (${filename}) Error fetching source file: ${errorMessage}`);
+					return {
+						error: `Failed to fetch source file: ${errorMessage}`
+					};
+				}
 			}
 		}
 
@@ -1488,12 +1644,15 @@ export default {
 		const isAudioInput = fileObject.type?.startsWith('audio/') || extension?.toLowerCase() === 'mp3';
 
 		// Get video/audio metadata early to determine source resolution/duration and prevent upscaling
-		logger.info(`[transcode-video-operation] (${filename}) Getting source metadata...`);
-		const sourceMetadata = await getVideoMetadata(filePath).catch(error => {
-			logger.error(`[transcode-video-operation] (${filename}) Error getting source metadata:`, error);
-			// If we can't get metadata, allow all qualities (fallback behavior)
-			return { width: 99999, height: 99999, isVertical: false, duration: 0 };
-		});
+		let sourceMetadata = { width: 99999, height: 99999, isVertical: false, duration: 0 };
+		if (filePath && fs.existsSync(filePath)) {
+			logger.info(`[transcode-video-operation] (${filename}) Getting source metadata...`);
+			sourceMetadata = await getVideoMetadata(filePath).catch(error => {
+				logger.error(`[transcode-video-operation] (${filename}) Error getting source metadata:`, error);
+				// If we can't get metadata, allow all qualities (fallback behavior)
+				return { width: 99999, height: 99999, isVertical: false, duration: 0 };
+			});
+		}
 
 		const metadata = sourceMetadata;
 		const sourceHeight = sourceMetadata.height;
@@ -1724,18 +1883,60 @@ export default {
 			}
 
 			// 2. Rebuild and upload playlists (.m3u8) to targetStorageAdapter
-			const playlistRecords = existingFileRecords.filter((rec: any) => rec.filename_disk?.endsWith('.m3u8'));
+			const playlistRecords: any[] = existingFileRecords.filter((rec: any) => rec.filename_disk?.endsWith('.m3u8'));
+			const useFilenameDisk = playlist_reference_type === 'filename_disk' || storage_adapter === 'r2' || targetStorageDriver !== 'local' || playlist_reference_type !== 'id';
+
+			// Map UUID -> filename_disk in case older playlists on disk referenced segments by Directus file UUID
+			const idToFilenameMap: Record<string, string> = {};
+			for (const rec of existingFileRecords) {
+				if (rec.id && rec.filename_disk) {
+					idToFilenameMap[String(rec.id)] = String(rec.filename_disk);
+				}
+			}
+
+			// Also scan local storage directory (/directus/uploads) for any .m3u8 files on disk that are missing from directus_files DB!
+			const defaultLocalRoot = resolveStorage(defaultStorageAdapter) || 'uploads';
+			const localUploadsDir = path.join(basePath, defaultLocalRoot);
+			if (fs.existsSync(localUploadsDir)) {
+				try {
+					const diskM3u8Files = fs.readdirSync(localUploadsDir).filter(fn =>
+						fn.endsWith('.m3u8') && (fn.startsWith(`${filename}_`) || fn === `${filename}.m3u8`)
+					);
+					for (const diskPlName of diskM3u8Files) {
+						if (!playlistRecords.some((r: any) => r.filename_disk === diskPlName)) {
+							logger.info(`[transcode-video-operation] (${filename}) Found orphaned local playlist on disk not in DB: ${diskPlName}, adding to move_hls queue`);
+							playlistRecords.push({
+								id: null,
+								filename_disk: diskPlName,
+								storage: defaultStorageAdapter
+							});
+						}
+					}
+				} catch (scanErr) {
+					logger.warn(`[transcode-video-operation] (${filename}) Could not scan local uploads dir for .m3u8 files:`, scanErr);
+				}
+			}
+
+			const uuidLinePattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 			for (const plRec of playlistRecords) {
 				const plName = plRec.filename_disk as string;
+				const recStoragePath = resolveStorage(plRec.storage) || 'uploads';
+				const localPlPath = path.join(basePath, recStoragePath, plName);
+				const existsOnLocalDisk = fs.existsSync(localPlPath);
+
+				// Only skip if already in targetStorageAdapter AND not lingering on local disk AND no segments moved
+				if (plRec.storage === targetStorageAdapter && !existsOnLocalDisk && movedCount === 0) {
+					fileIdMap[plName] = plRec.id;
+					uploadedFiles.push({ filename_disk: plName, id: plRec.id });
+					continue;
+				}
 				try {
 					let playlistContent = '';
-					const recStoragePath = resolveStorage(plRec.storage) || 'uploads';
-					const localPlPath = path.join(basePath, recStoragePath, plName);
 
-					if (fs.existsSync(localPlPath)) {
+					if (existsOnLocalDisk) {
 						playlistContent = fs.readFileSync(localPlPath, 'utf-8');
-					} else {
+					} else if (plRec.id) {
 						let plStream: any;
 						try {
 							if (typeof (filesService as any).getStream === 'function') {
@@ -1785,6 +1986,14 @@ export default {
 									newLine = line.replace(`URI="${originalKeyURI}"`, `URI="${keyBasename}"`);
 								}
 							}
+						} else if (!line.startsWith('#') && line.trim() !== '') {
+							let refLine = line.trim();
+							if (refLine.startsWith('/assets/')) {
+								refLine = refLine.substring('/assets/'.length).trim();
+							}
+							if (useFilenameDisk && uuidLinePattern.test(refLine) && idToFilenameMap[refLine]) {
+								newLine = idToFilenameMap[refLine];
+							}
 						}
 						newLines.push(newLine);
 					}
@@ -1794,7 +2003,9 @@ export default {
 					fs.writeFileSync(tempPlPath, newLines.join('\n'));
 
 					// Delete old playlist record from directus_files DB BEFORE uploadOne to avoid filename_disk collision
-					try { await filesService.deleteOne(plRec.id); } catch (e) {}
+					if (plRec.id) {
+						try { await filesService.deleteOne(plRec.id); } catch (e) {}
+					}
 
 					const newPlId = await uploadFileToDirectus(tempPlPath, targetFolderId, {
 						mimetype: 'application/x-mpegurl',
@@ -1816,6 +2027,45 @@ export default {
 				}
 			}
 
+			// 3. If master playlist (${filename}_master.m3u8) is missing from both DB and disk, generate and upload it!
+			const masterPlName = `${filename}_master.m3u8`;
+			if (!fileIdMap[masterPlName] && !playlistRecords.some((r: any) => r.filename_disk === masterPlName || r.filename_disk === `${filename}.m3u8`)) {
+				const masterLines: string[] = ['#EXTM3U', '#EXT-X-VERSION:3'];
+				const qualityDefs = [
+					{ id: 240, bw: 400000, res: '426x240' },
+					{ id: 480, bw: 1400000, res: '854x480' },
+					{ id: 720, bw: 2800000, res: '1280x720' },
+					{ id: 1080, bw: 5000000, res: '1920x1080' },
+					{ id: 2160, bw: 15000000, res: '3840x2160' }
+				];
+				for (const qDef of qualityDefs) {
+					const qPlName = `${filename}_${qDef.id}p.m3u8`;
+					if (fileIdMap[qPlName] || playlistRecords.some((r: any) => r.filename_disk === qPlName)) {
+						const refTarget = useFilenameDisk ? qPlName : (fileIdMap[qPlName] || qPlName);
+						masterLines.push(`#EXT-X-STREAM-INF:BANDWIDTH=${qDef.bw},RESOLUTION=${qDef.res}`, refTarget);
+					}
+				}
+				if (masterLines.length > 2) {
+					try {
+						const tempMasterPath = path.join(outputDir, masterPlName);
+						fs.mkdirSync(path.dirname(tempMasterPath), { recursive: true });
+						fs.writeFileSync(tempMasterPath, masterLines.join('\n'));
+						const newMasterId = await uploadFileToDirectus(tempMasterPath, targetFolderId, {
+							mimetype: 'application/x-mpegurl',
+							storage: targetStorageAdapter
+						});
+						fileIdMap[masterPlName] = newMasterId;
+						uploadedFiles.push({ filename_disk: masterPlName, id: newMasterId });
+						playlistRecords.push({ id: newMasterId, filename_disk: masterPlName, storage: targetStorageAdapter });
+						try { fs.unlinkSync(tempMasterPath); } catch (e) {}
+						movedCount++;
+						logger.info(`[transcode-video-operation] (${filename}) Generated and uploaded missing master playlist ${masterPlName} to ${targetStorageAdapter}`);
+					} catch (genMasterErr) {
+						logger.error(`[transcode-video-operation] (${filename}) Error generating/uploading master playlist ${masterPlName}:`, genMasterErr);
+					}
+				}
+			}
+
 			if (fs.existsSync(outputDir)) {
 				try { fs.rmSync(outputDir, { recursive: true, force: true }); } catch (e) {}
 			}
@@ -1828,14 +2078,29 @@ export default {
 				uploadedFiles.push({ filename_disk: fileObject.filename_disk, id: sourceBackupId });
 			}
 
-			// Delete original source file if delete_source_file option is enabled
+			// Clean up temporary source file after successful backup upload
+			if (needsCleanup && tempSourceFile) {
+				try {
+					if (fs.existsSync(tempSourceFile)) {
+						fs.unlinkSync(tempSourceFile);
+						logger.info(`[transcode-video-operation] (${filename}) Temporary source file cleaned up: ${tempSourceFile}`);
+					}
+				} catch (error) {
+					logger.warn(`[transcode-video-operation] (${filename}) Could not delete temporary source file ${tempSourceFile}:`, error);
+				}
+			}
+
+			// Delete original source file if delete_source_file option is enabled (and not already removed during backup)
 			if (delete_source_file && targetFileId && targetFileId !== sourceBackupId) {
 				try {
-					logger.info(`[transcode-video-operation] (${filename}) delete_source_file is enabled. Deleting original source file record (ID: ${targetFileId})...`);
 					const { FilesService } = services;
 					const filesService = new FilesService({ schema: await getSchema() });
-					await filesService.deleteOne(targetFileId);
-					logger.info(`[transcode-video-operation] (${filename}) Original source file deleted successfully.`);
+					const remainingRec = await filesService.readOne(targetFileId).catch(() => null);
+					if (remainingRec && remainingRec.storage !== originalStorageAdapter) {
+						logger.info(`[transcode-video-operation] (${filename}) delete_source_file is enabled. Deleting original source file record (ID: ${targetFileId})...`);
+						await filesService.deleteOne(targetFileId);
+						logger.info(`[transcode-video-operation] (${filename}) Original source file deleted successfully.`);
+					}
 				} catch (deleteSourceErr) {
 					logger.error(`[transcode-video-operation] (${filename}) Could not delete original source file ${targetFileId}:`, deleteSourceErr);
 				}
@@ -3052,14 +3317,17 @@ export default {
 			}
 		}
 
-		// Delete original source file if delete_source_file option is enabled
+		// Delete original source file if delete_source_file option is enabled (and not already removed during backup)
 		if (delete_source_file && targetFileId && targetFileId !== sourceBackupId) {
 			try {
-				logger.info(`[transcode-video-operation] (${filename}) delete_source_file is enabled. Deleting original source file record (ID: ${targetFileId})...`);
 				const { FilesService } = services;
 				const filesService = new FilesService({ schema: await getSchema() });
-				await filesService.deleteOne(targetFileId);
-				logger.info(`[transcode-video-operation] (${filename}) Original source file deleted successfully.`);
+				const remainingRec = await filesService.readOne(targetFileId).catch(() => null);
+				if (remainingRec && remainingRec.storage !== originalStorageAdapter) {
+					logger.info(`[transcode-video-operation] (${filename}) delete_source_file is enabled. Deleting original source file record (ID: ${targetFileId})...`);
+					await filesService.deleteOne(targetFileId);
+					logger.info(`[transcode-video-operation] (${filename}) Original source file deleted successfully.`);
+				}
 			} catch (deleteSourceErr) {
 				logger.error(`[transcode-video-operation] (${filename}) Could not delete original source file ${targetFileId}:`, deleteSourceErr);
 			}
