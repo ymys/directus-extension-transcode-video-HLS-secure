@@ -718,6 +718,8 @@ export default {
 				filename_disk?: string;
 				filename_download?: string;
 				title?: string;
+				primaryKey?: string;
+				skipExistingDelete?: boolean;
 			} = {}
 		): Promise<string> => {
 			try {
@@ -753,6 +755,7 @@ export default {
 				};
 
 				const mimetype = options.mimetype || types[extension] || 'application/octet-stream';
+				let replacePrimaryKey: string | undefined = options.primaryKey || undefined;
 
 				// Check if file with this filename_disk already exists in Directus (across ANY storage or folder,
 				// because Directus's assertUniqueFilename enforces global uniqueness of filename_disk across directus_files)
@@ -777,27 +780,47 @@ export default {
 						}
 					}
 
-					// Otherwise (e.g. moving from local to r2/r2_private, or updating a rebuilt .m3u8 playlist),
-					// remove old record(s) with the same filename_disk BEFORE uploadOne() so assertUniqueFilename does not throw ForbiddenError.
+					// Otherwise (e.g. moving from local to r2/r2_private, or updating a rebuilt .m3u8 playlist):
+					// If skipExistingDelete is true (e.g. primary video record referenced by foreign keys like kajian_files),
+					// or if deleteOne fails due to foreign key constraints, pass replacePrimaryKey to uploadOne()
+					// so Directus updates the record in-place and passes excludeId to assertUniqueFilename!
 					if (!isKeyFile) {
 						for (const oldFile of existingFiles) {
 							const oldId = oldFile?.id || oldFile?.data?.id || (typeof oldFile === 'string' ? oldFile : null);
-							if (oldId) {
-								try {
-									await filesService.deleteOne(oldId);
-								} catch (delExistingErr) {
-									logger.warn(`[transcode-video-operation] (${filename}) Could not delete existing file record ${oldId} (${fileName}) before upload:`, delExistingErr);
+							if (!oldId) continue;
+
+							if (options.skipExistingDelete && (!replacePrimaryKey || String(oldId) === String(replacePrimaryKey))) {
+								replacePrimaryKey = String(oldId);
+								continue;
+							}
+
+							try {
+								await filesService.deleteOne(oldId);
+							} catch (delExistingErr) {
+								logger.warn(`[transcode-video-operation] (${filename}) Could not delete existing file record ${oldId} (${fileName}) before upload (likely referenced by foreign key); will replace in-place using primaryKey=${oldId}:`, delExistingErr);
+								if (!replacePrimaryKey) {
+									replacePrimaryKey = String(oldId);
 								}
 							}
 						}
 					}
 				}
 
+				// Ensure filename_download has the same extension as filename_disk when replacing in-place,
+				// because Directus's uploadOne() checks `path.extname(payload.filename_disk) !== fileExtension`
+				const diskExt = path.extname(fileName);
+				let downloadName = options.filename_download || fileName;
+				if (replacePrimaryKey && diskExt && path.extname(downloadName) !== diskExt) {
+					const dlExt = path.extname(downloadName);
+					const baseDl = dlExt ? downloadName.slice(0, -dlExt.length) : downloadName;
+					downloadName = `${baseDl}${diskExt}`;
+				}
+
 				// Prepare file data
 				const fileData: any = {
 					storage: storage,
 					filename_disk: fileName,
-					filename_download: options.filename_download || fileName,
+					filename_download: downloadName,
 					title: options.title || fileName,
 					type: mimetype,
 					filesize: fileSizeInBytes
@@ -827,11 +850,18 @@ export default {
 
 					if (isFileLocalStorage && isFileInStorageDir) {
 						// For local storage where file is already in the target storage directory:
-						// Just create the database record using createOne()
-						fileId = await filesService.createOne(fileData);
+						// Just create or update the database record
+						if (replacePrimaryKey) {
+							await filesService.updateOne(replacePrimaryKey, fileData);
+							fileId = replacePrimaryKey;
+						} else {
+							fileId = await filesService.createOne(fileData);
+						}
 					} else {
 						// For cloud storage OR local storage when file is in a temp directory:
-						// Use uploadOne() to upload/write the file stream to the configured storage driver
+						// Use uploadOne() to upload/write the file stream to the configured storage driver.
+						// When replacePrimaryKey is passed as 3rd arg, Directus updates the existing record in-place
+						// and excludes replacePrimaryKey in assertUniqueFilename(), avoiding ForbiddenError!
 						const fileStream = fs.createReadStream(filePath);
 
 						// Handle stream errors
@@ -839,10 +869,9 @@ export default {
 							logger.error(`[transcode-video-operation] (${filename}) File stream error for ${fileName}:`, streamError);
 						});
 
-						fileId = await filesService.uploadOne(
-							fileStream,
-							fileData
-						);
+						fileId = replacePrimaryKey
+							? await filesService.uploadOne(fileStream, fileData, replacePrimaryKey)
+							: await filesService.uploadOne(fileStream, fileData);
 					}
 
 					// Verify which storage was actually used by reading the file record back
@@ -892,8 +921,27 @@ export default {
 				return null;
 			}
 
+			const unlinkLocalSourceFileIfNeeded = () => {
+				if (delete_source_file && isLocalSource) {
+					const localRoot = resolveStorage(fileObject.storage);
+					if (localRoot) {
+						const basePath = process.env.PWD || '/directus';
+						const localSourcePath = path.join(basePath, localRoot, fileObject.filename_disk);
+						if (fs.existsSync(localSourcePath)) {
+							try {
+								fs.unlinkSync(localSourcePath);
+								logger.info(`[transcode-video-operation] (${filename}) Deleted physical local source file (${localSourcePath}) after moving to ${originalStorageAdapter}.`);
+							} catch (unlinkErr) {
+								logger.warn(`[transcode-video-operation] (${filename}) Could not delete physical local source file ${localSourcePath}:`, unlinkErr);
+							}
+						}
+					}
+				}
+			};
+
 			if (fileObject.storage === originalStorageAdapter) {
 				logger.info(`[transcode-video-operation] (${filename}) Original source file is already stored in target private storage (${originalStorageAdapter}), skipping re-upload.`);
+				unlinkLocalSourceFileIfNeeded();
 				return targetFileId;
 			}
 
@@ -923,12 +971,15 @@ export default {
 
 			const { FilesService } = services;
 			const fsService = new FilesService({ schema: await getSchema() });
-			const deletedSourceRecords: any[] = [];
 
 			try {
 				// 1. Check if a record with this filename_disk already exists in directus_files across ANY storage or folder.
 				// Directus's internal assertUniqueFilename() throws ForbiddenError ("You don't have permission to access this.")
-				// if ANY record in directus_files already has the same filename_disk when uploadOne() calls createOne().
+				// if ANY record in directus_files already has the same filename_disk unless that record's primaryKey is passed
+				// to uploadOne(stream, data, primaryKey) so Directus replaces it in-place and passes excludeId to assertUniqueFilename().
+				// Updating in-place also preserves foreign key references (e.g. kajian_files.directus_files_id) and custom fields
+				// (e.g. hls_playlist, duration) on the primary file record, and avoids calling FilesService.deleteMany() which
+				// would otherwise run disk.list(filePrefix) on local storage and delete .key and _thumb.jpg files!
 				const existingRecords = await fsService.readByQuery({
 					filter: {
 						filename_disk: { _eq: fileObject.filename_disk }
@@ -936,47 +987,39 @@ export default {
 					limit: -1
 				});
 
+				let primarySourceId: string | undefined = targetFileId || undefined;
+
 				if (existingRecords && Array.isArray(existingRecords) && existingRecords.length > 0) {
 					const alreadyInTarget = existingRecords.find((r: any) => r.storage === originalStorageAdapter);
 					if (alreadyInTarget && alreadyInTarget.id) {
 						logger.info(`[transcode-video-operation] (${filename}) Original source file already exists in ${originalStorageAdapter} (ID: ${alreadyInTarget.id}), reusing.`);
+						unlinkLocalSourceFileIfNeeded();
 						return String(alreadyInTarget.id);
 					}
 
-					// Delete existing record(s) with the same filename_disk BEFORE uploadOne() to avoid Directus assertUniqueFilename ForbiddenError.
-					// This is safe because filePath points to the isolated copy in /directus/tmp/transcode/source_...
-					for (const rec of existingRecords) {
-						const recId = rec?.id || rec?.data?.id || (typeof rec === 'string' ? rec : null);
-						if (recId) {
-							deletedSourceRecords.push(rec);
-							logger.info(`[transcode-video-operation] (${filename}) Removing old DB record (ID: ${recId}, storage: ${rec.storage}) before uploading to ${originalStorageAdapter} to prevent filename_disk uniqueness collision...`);
-							try {
-								await fsService.deleteOne(recId);
-							} catch (delErr) {
-								logger.warn(`[transcode-video-operation] (${filename}) Could not delete old DB record ${recId}:`, delErr);
-							}
+					if (!primarySourceId) {
+						const firstRec = existingRecords[0];
+						const firstId = firstRec?.id || firstRec?.data?.id || (typeof firstRec === 'string' ? firstRec : null);
+						if (firstId) {
+							primarySourceId = String(firstId);
 						}
 					}
 
-					// If delete_source_file is false and source was on local storage, restore the physical local file copy that deleteOne removed
-					if (!delete_source_file && isLocalSource) {
-						const localRoot = resolveStorage(fileObject.storage);
-						if (localRoot) {
-							const basePath = process.env.PWD || '/directus';
-							const localRestorePath = path.join(basePath, localRoot, fileObject.filename_disk);
-							if (!fs.existsSync(localRestorePath)) {
-								try {
-									fs.copyFileSync(filePath, localRestorePath);
-									logger.info(`[transcode-video-operation] (${filename}) Restored physical source file to local storage (${localRestorePath}) since delete_source_file is false.`);
-								} catch (restoreCopyErr) {
-									logger.warn(`[transcode-video-operation] (${filename}) Could not restore local copy to ${localRestorePath}:`, restoreCopyErr);
-								}
+					// Only remove extra duplicate records if there are multiple records with the same filename_disk;
+					// never delete the primary source record (primarySourceId) which we replace in-place.
+					for (const rec of existingRecords) {
+						const recId = rec?.id || rec?.data?.id || (typeof rec === 'string' ? rec : null);
+						if (recId && String(recId) !== String(primarySourceId)) {
+							try {
+								await fsService.deleteOne(recId);
+							} catch (delErr) {
+								logger.warn(`[transcode-video-operation] (${filename}) Could not delete duplicate DB record ${recId}:`, delErr);
 							}
 						}
 					}
 				}
 
-				logger.info(`[transcode-video-operation] (${filename}) Uploading original source file (${fileObject.filename_disk}) to private storage: ${originalStorageAdapter}...`);
+				logger.info(`[transcode-video-operation] (${filename}) Uploading original source file (${fileObject.filename_disk}) to private storage: ${originalStorageAdapter} (in-place primaryKey: ${primarySourceId || 'new'})...`);
 				const backupId = await uploadFileToDirectus(filePath, parentFolderId, {
 					mimetype: fileObject.type || 'video/mp4',
 					storage: originalStorageAdapter,
@@ -984,33 +1027,21 @@ export default {
 					filename_download: fileObject.filename_download || fileObject.filename_disk,
 					title: fileObject.title || fileObject.filename_disk,
 					width: fileObject.width || (typeof metadata !== 'undefined' ? (metadata as any)?.width : null),
-					height: fileObject.height || (typeof metadata !== 'undefined' ? (metadata as any)?.height : null)
+					height: fileObject.height || (typeof metadata !== 'undefined' ? (metadata as any)?.height : null),
+					primaryKey: primarySourceId,
+					skipExistingDelete: true
 				});
 				logger.info(`[transcode-video-operation] (${filename}) Original source file uploaded to private storage (${originalStorageAdapter}) successfully! File ID: ${backupId}`);
+
+				// If delete_source_file is enabled and the source was originally on local disk, remove ONLY the physical .mp4 file
+				// from /directus/uploads (without deleting the DB record that now points to r2_private, and without touching .key / _thumb.jpg)
+				unlinkLocalSourceFileIfNeeded();
+
 				return backupId;
 			} catch (backupErr) {
 				// Preserve the isolated temp source file on disk so the .mp4 is NEVER lost if private storage upload fails!
 				needsCleanup = false;
 				logger.error(`[transcode-video-operation] (${filename}) Error uploading original source file to private storage (${originalStorageAdapter}). Temp source file preserved at: ${filePath}`, backupErr);
-
-				// Attempt to restore the original local file record in Directus if we removed it before upload
-				if (deletedSourceRecords.length > 0 && filePath && fs.existsSync(filePath)) {
-					try {
-						const origRec = deletedSourceRecords[0];
-						const origStorage = origRec.storage || fileObject.storage || defaultStorageAdapter;
-						logger.info(`[transcode-video-operation] (${filename}) Restoring original source file record to storage "${origStorage}" after failed private storage upload...`);
-						await uploadFileToDirectus(filePath, origRec.folder || folder_id || null, {
-							mimetype: fileObject.type || 'video/mp4',
-							storage: origStorage,
-							filename_disk: fileObject.filename_disk,
-							filename_download: fileObject.filename_download || fileObject.filename_disk,
-							title: fileObject.title || fileObject.filename_disk
-						});
-					} catch (restoreErr) {
-						logger.warn(`[transcode-video-operation] (${filename}) Could not automatically re-register local source record; physical file remains intact at ${filePath}:`, restoreErr);
-					}
-				}
-
 				throw backupErr;
 			}
 		};
@@ -2093,13 +2124,25 @@ export default {
 			// Delete original source file if delete_source_file option is enabled (and not already removed during backup)
 			if (delete_source_file && targetFileId && targetFileId !== sourceBackupId) {
 				try {
-					const { FilesService } = services;
-					const filesService = new FilesService({ schema: await getSchema() });
-					const remainingRec = await filesService.readOne(targetFileId).catch(() => null);
-					if (remainingRec && remainingRec.storage !== originalStorageAdapter) {
-						logger.info(`[transcode-video-operation] (${filename}) delete_source_file is enabled. Deleting original source file record (ID: ${targetFileId})...`);
-						await filesService.deleteOne(targetFileId);
-						logger.info(`[transcode-video-operation] (${filename}) Original source file deleted successfully.`);
+					if (isLocalSource) {
+						const localRoot = resolveStorage(fileObject.storage);
+						if (localRoot) {
+							const basePath = process.env.PWD || '/directus';
+							const localSourcePath = path.join(basePath, localRoot, fileObject.filename_disk);
+							if (fs.existsSync(localSourcePath)) {
+								fs.unlinkSync(localSourcePath);
+								logger.info(`[transcode-video-operation] (${filename}) delete_source_file is enabled. Deleted physical local source file (${localSourcePath}).`);
+							}
+						}
+					} else {
+						const { FilesService } = services;
+						const filesService = new FilesService({ schema: await getSchema() });
+						const remainingRec = await filesService.readOne(targetFileId).catch(() => null);
+						if (remainingRec && remainingRec.storage !== originalStorageAdapter) {
+							logger.info(`[transcode-video-operation] (${filename}) delete_source_file is enabled. Deleting original source file record (ID: ${targetFileId})...`);
+							await filesService.deleteOne(targetFileId);
+							logger.info(`[transcode-video-operation] (${filename}) Original source file deleted successfully.`);
+						}
 					}
 				} catch (deleteSourceErr) {
 					logger.error(`[transcode-video-operation] (${filename}) Could not delete original source file ${targetFileId}:`, deleteSourceErr);
@@ -3320,13 +3363,25 @@ export default {
 		// Delete original source file if delete_source_file option is enabled (and not already removed during backup)
 		if (delete_source_file && targetFileId && targetFileId !== sourceBackupId) {
 			try {
-				const { FilesService } = services;
-				const filesService = new FilesService({ schema: await getSchema() });
-				const remainingRec = await filesService.readOne(targetFileId).catch(() => null);
-				if (remainingRec && remainingRec.storage !== originalStorageAdapter) {
-					logger.info(`[transcode-video-operation] (${filename}) delete_source_file is enabled. Deleting original source file record (ID: ${targetFileId})...`);
-					await filesService.deleteOne(targetFileId);
-					logger.info(`[transcode-video-operation] (${filename}) Original source file deleted successfully.`);
+				if (isLocalSource) {
+					const localRoot = resolveStorage(fileObject.storage);
+					if (localRoot) {
+						const basePath = process.env.PWD || '/directus';
+						const localSourcePath = path.join(basePath, localRoot, fileObject.filename_disk);
+						if (fs.existsSync(localSourcePath)) {
+							fs.unlinkSync(localSourcePath);
+							logger.info(`[transcode-video-operation] (${filename}) delete_source_file is enabled. Deleted physical local source file (${localSourcePath}).`);
+						}
+					}
+				} else {
+					const { FilesService } = services;
+					const filesService = new FilesService({ schema: await getSchema() });
+					const remainingRec = await filesService.readOne(targetFileId).catch(() => null);
+					if (remainingRec && remainingRec.storage !== originalStorageAdapter) {
+						logger.info(`[transcode-video-operation] (${filename}) delete_source_file is enabled. Deleting original source file record (ID: ${targetFileId})...`);
+						await filesService.deleteOne(targetFileId);
+						logger.info(`[transcode-video-operation] (${filename}) Original source file deleted successfully.`);
+					}
 				}
 			} catch (deleteSourceErr) {
 				logger.error(`[transcode-video-operation] (${filename}) Could not delete original source file ${targetFileId}:`, deleteSourceErr);
